@@ -1,0 +1,939 @@
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { doc, collection, onSnapshot, setDoc, deleteDoc } from "firebase/firestore";
+import { db } from "./firebase";
+import { Flame, Dumbbell, Gift, Check, Plus, X, Trophy, Pencil, Camera, Star } from "lucide-react";
+
+const DOC_REF = doc(db, "gymCouple", "shared");
+const CHECKINS_COL = collection(db, "checkins");
+const ME_KEY = "gc:me";
+
+const DAY_LABELS = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"];
+
+function toISODate(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function startOfWeek(date) {
+  const d = new Date(date);
+  const dow = (d.getDay() + 6) % 7;
+  d.setDate(d.getDate() - dow);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function weekDates(weekStart) {
+  return Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(weekStart);
+    d.setDate(d.getDate() + i);
+    return d;
+  });
+}
+
+function weekKey(weekStart) {
+  return toISODate(weekStart);
+}
+
+function fileToCompressedDataURL(file, maxWidth = 320, quality = 0.55) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("No se pudo leer la imagen"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("No se pudo procesar la imagen"));
+      img.onload = () => {
+        const scale = Math.min(1, maxWidth / img.width);
+        const w = Math.round(img.width * scale);
+        const h = Math.round(img.height * scale);
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+const DEFAULT_DATA = {
+  config: null,
+  checkins: {},
+  goal: 4,
+  evaluatedWeeks: [],
+  penalties: [],
+  wishlists: {},
+};
+
+export default function GymCoupleApp() {
+  const [meta, setMeta] = useState(null); // config, goal, evaluatedWeeks, penalties, wishlists
+  const [checkinsMap, setCheckinsMap] = useState({}); // { "YYYY-MM-DD": { [name]: { photo, ts } } }
+  const [me, setMe] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [setupNames, setSetupNames] = useState({ a: "", b: "" });
+  const [goalDraft, setGoalDraft] = useState(null);
+  const [editingGoal, setEditingGoal] = useState(false);
+  const [penaltyForm, setPenaltyForm] = useState(null);
+  const [today, setToday] = useState(new Date());
+  const [viewingPhoto, setViewingPhoto] = useState(null);
+  const [capturing, setCapturing] = useState(false);
+  const [captureError, setCaptureError] = useState("");
+  const fileInputRef = useRef(null);
+  const pendingCellRef = useRef(null);
+
+  // Sincronización en vivo con Firestore: si tu pareja marca un día desde
+  // su celular, a ti se te actualiza solo, sin recargar la página.
+  // Cada check-in (foto incluida) vive en su propio documento chiquito
+  // dentro de la colección "checkins", así el documento compartido nunca
+  // crece demasiado y no hace falta Firebase Storage (que pide tarjeta).
+  useEffect(() => {
+    const unsubMeta = onSnapshot(
+      DOC_REF,
+      (snap) => {
+        setMeta(snap.exists() ? { ...DEFAULT_DATA, ...snap.data() } : DEFAULT_DATA);
+        setLoading(false);
+      },
+      (err) => {
+        console.error("Error de Firestore", err);
+        setLoading(false);
+      }
+    );
+    const unsubCheckins = onSnapshot(CHECKINS_COL, (snap) => {
+      const map = {};
+      snap.forEach((docSnap) => {
+        const d = docSnap.data();
+        if (!d?.date || !d?.name) return;
+        if (!map[d.date]) map[d.date] = {};
+        map[d.date][d.name] = { photo: d.photo, ts: d.ts };
+      });
+      setCheckinsMap(map);
+    });
+    const savedMe = window.localStorage.getItem(ME_KEY);
+    if (savedMe) setMe(savedMe);
+    return () => {
+      unsubMeta();
+      unsubCheckins();
+    };
+  }, []);
+
+  const data = meta ? { ...DEFAULT_DATA, ...meta, checkins: checkinsMap } : null;
+
+  // Guarda todo excepto los check-ins (esos van aparte, ver arriba).
+  const persist = useCallback(async (next) => {
+    const { checkins, ...metaOnly } = next;
+    try {
+      await setDoc(DOC_REF, metaOnly);
+    } catch (e) {
+      console.error("No se pudo guardar", e);
+    }
+  }, []);
+
+  const chooseMe = (name) => {
+    setMe(name);
+    window.localStorage.setItem(ME_KEY, name);
+  };
+
+  const saveSetup = async () => {
+    const a = setupNames.a.trim();
+    const b = setupNames.b.trim();
+    if (!a || !b) return;
+    await persist({ ...DEFAULT_DATA, config: { nameA: a, nameB: b } });
+  };
+
+  const wStart = useMemo(() => startOfWeek(today), [today]);
+  const wDates = useMemo(() => weekDates(wStart), [wStart]);
+  const wKey = useMemo(() => weekKey(wStart), [wStart]);
+
+  const names = data?.config ? [data.config.nameA, data.config.nameB] : [];
+
+  const requestPhotoForCell = (dateStr, name) => {
+    setCaptureError("");
+    pendingCellRef.current = { dateStr, name };
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChosen = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    const cell = pendingCellRef.current;
+    pendingCellRef.current = null;
+    if (!file || !cell) return;
+    setCapturing(true);
+    setCaptureError("");
+    try {
+      const compressed = await fileToCompressedDataURL(file);
+      // Un documento chiquito por día+persona, dentro de la colección
+      // "checkins". La foto comprimida pesa unos 20-40 KB, muy por debajo
+      // del límite de 1 MB por documento de Firestore.
+      const checkinDoc = doc(db, "checkins", `${cell.dateStr}_${cell.name}`);
+      await setDoc(checkinDoc, {
+        date: cell.dateStr,
+        name: cell.name,
+        photo: compressed,
+        ts: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.error(err);
+      setCaptureError("No se pudo guardar la foto, intenta de nuevo.");
+    } finally {
+      setCapturing(false);
+    }
+  };
+
+  const removeCheckin = async (dateStr, name) => {
+    try {
+      await deleteDoc(doc(db, "checkins", `${dateStr}_${name}`));
+    } catch (e) {
+      console.error("No se pudo eliminar la marca", e);
+    }
+    setViewingPhoto(null);
+  };
+
+  const countForWeek = (name) => {
+    if (!data) return 0;
+    return wDates.reduce((acc, d) => {
+      const iso = toISODate(d);
+      return acc + (data.checkins[iso]?.[name] ? 1 : 0);
+    }, 0);
+  };
+
+  const comboStreak = useMemo(() => {
+    if (!data || names.length < 2) return 0;
+    let streak = 0;
+    let cursor = new Date(today);
+    cursor.setHours(0, 0, 0, 0);
+    for (let i = 0; i < 3650; i++) {
+      const iso = toISODate(cursor);
+      const day = data.checkins[iso];
+      const bothTrained = day && names.every((n) => day[n]);
+      if (bothTrained) {
+        streak += 1;
+        cursor.setDate(cursor.getDate() - 1);
+      } else if (iso === toISODate(today)) {
+        cursor.setDate(cursor.getDate() - 1);
+      } else {
+        break;
+      }
+    }
+    return streak;
+  }, [data, names, today]);
+
+  const wishlistFor = (name) => data?.wishlists?.[name] || [];
+
+  const addWish = (name, text) => {
+    const t = text.trim();
+    if (!t) return;
+    const item = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, text: t };
+    const next = { ...data.wishlists, [name]: [...wishlistFor(name), item] };
+    persist({ ...data, wishlists: next });
+  };
+
+  const removeWish = (name, id) => {
+    const next = { ...data.wishlists, [name]: wishlistFor(name).filter((w) => w.id !== id) };
+    persist({ ...data, wishlists: next });
+  };
+
+  const claimWishOrDefault = (winnerName, wishlistsSnapshot) => {
+    const list = wishlistsSnapshot[winnerName] || [];
+    if (list.length === 0) return { prize: "un premio sorpresa", wishlists: wishlistsSnapshot };
+    const [first, ...rest] = list;
+    return { prize: first.text, wishlists: { ...wishlistsSnapshot, [winnerName]: rest } };
+  };
+
+  const addPenalty = (from, to, prize) => {
+    const entry = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      from,
+      to,
+      prize: prize || "un premio sorpresa",
+      done: false,
+      date: toISODate(new Date()),
+    };
+    persist({ ...data, penalties: [entry, ...data.penalties] });
+  };
+
+  const evaluateWeek = () => {
+    if (!data || data.evaluatedWeeks.includes(wKey)) return;
+    const [nameA, nameB] = names;
+    const countA = countForWeek(nameA);
+    const countB = countForWeek(nameB);
+    const goal = data.goal;
+    let wishlists = { ...data.wishlists };
+    const newPenalties = [];
+
+    if (countA < goal && countB >= goal) {
+      const { prize, wishlists: w2 } = claimWishOrDefault(nameB, wishlists);
+      wishlists = w2;
+      newPenalties.push({
+        id: `${Date.now()}-a`,
+        from: nameA,
+        to: nameB,
+        prize,
+        reason: `no llegó a ${goal} días esta semana (${countA}/${goal})`,
+        done: false,
+        date: toISODate(new Date()),
+      });
+    }
+    if (countB < goal && countA >= goal) {
+      const { prize, wishlists: w2 } = claimWishOrDefault(nameA, wishlists);
+      wishlists = w2;
+      newPenalties.push({
+        id: `${Date.now()}-b`,
+        from: nameB,
+        to: nameA,
+        prize,
+        reason: `no llegó a ${goal} días esta semana (${countB}/${goal})`,
+        done: false,
+        date: toISODate(new Date()),
+      });
+    }
+
+    persist({
+      ...data,
+      evaluatedWeeks: [...data.evaluatedWeeks, wKey],
+      penalties: [...newPenalties, ...data.penalties],
+      wishlists,
+    });
+  };
+
+  const togglePenaltyDone = (id) => {
+    const next = {
+      ...data,
+      penalties: data.penalties.map((p) => (p.id === id ? { ...p, done: !p.done } : p)),
+    };
+    persist(next);
+  };
+
+  const removePenalty = (id) => {
+    persist({ ...data, penalties: data.penalties.filter((p) => p.id !== id) });
+  };
+
+  const saveGoal = () => {
+    const g = parseInt(goalDraft, 10);
+    if (!g || g < 1 || g > 7) return;
+    persist({ ...data, goal: g });
+    setEditingGoal(false);
+  };
+
+  if (loading) {
+    return (
+      <div className="gc-app gc-center">
+        <style>{css}</style>
+        <Dumbbell className="gc-spin" size={28} />
+      </div>
+    );
+  }
+
+  if (!data.config) {
+    return (
+      <div className="gc-app gc-center">
+        <style>{css}</style>
+        <div className="gc-panel gc-setup">
+          <Dumbbell size={30} className="gc-accent-icon" />
+          <h1>Empecemos</h1>
+          <p className="gc-muted">Ingresa los nombres de los dos para llevar el registro juntos.</p>
+          <input
+            className="gc-input"
+            placeholder="Tu nombre"
+            value={setupNames.a}
+            onChange={(e) => setSetupNames((s) => ({ ...s, a: e.target.value }))}
+          />
+          <input
+            className="gc-input"
+            placeholder="Nombre de tu pareja"
+            value={setupNames.b}
+            onChange={(e) => setSetupNames((s) => ({ ...s, b: e.target.value }))}
+          />
+          <button className="gc-btn gc-btn-primary" onClick={saveSetup}>
+            Crear
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!me) {
+    return (
+      <div className="gc-app gc-center">
+        <style>{css}</style>
+        <div className="gc-panel gc-setup">
+          <h1>¿Quién eres?</h1>
+          <p className="gc-muted">Esto queda guardado en este dispositivo.</p>
+          <div className="gc-who-row">
+            <button className="gc-btn gc-btn-a" onClick={() => chooseMe(data.config.nameA)}>
+              {data.config.nameA}
+            </button>
+            <button className="gc-btn gc-btn-b" onClick={() => chooseMe(data.config.nameB)}>
+              {data.config.nameB}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const [nameA, nameB] = names;
+  const countA = countForWeek(nameA);
+  const countB = countForWeek(nameB);
+  const goal = data.goal;
+  const alreadyEvaluated = data.evaluatedWeeks.includes(wKey);
+  const pendingPenalties = data.penalties.filter((p) => !p.done);
+  const resolvedPenalties = data.penalties.filter((p) => p.done);
+  const myWishlist = wishlistFor(me);
+  const partnerName = me === nameA ? nameB : nameA;
+  const partnerWishlist = wishlistFor(partnerName);
+  const toWishlist = penaltyForm ? wishlistFor(penaltyForm.to) : [];
+
+  return (
+    <div className="gc-app">
+      <style>{css}</style>
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        style={{ display: "none" }}
+        onChange={handleFileChosen}
+      />
+
+      <header className="gc-header">
+        <div>
+          <div className="gc-title-row">
+            <Dumbbell size={20} />
+            <span className="gc-app-name">Rutina en Pareja</span>
+          </div>
+          <div className="gc-subtitle">
+            {nameA} &amp; {nameB} · tú eres {me}
+          </div>
+        </div>
+        <div className="gc-streak">
+          <Flame size={28} className={comboStreak > 0 ? "gc-flame-lit" : "gc-flame"} />
+          <div>
+            <div className="gc-streak-num">{comboStreak}</div>
+            <div className="gc-streak-label">días seguidos juntos</div>
+          </div>
+        </div>
+      </header>
+
+      <section className="gc-panel gc-week">
+        <p className="gc-hint gc-hint-top">
+          <Camera size={13} /> Para marcar un día tienes que tomarte una foto en el gym.
+        </p>
+        <div className="gc-week-grid">
+          <div className="gc-week-row gc-week-row-labels">
+            <div className="gc-week-name-spacer" />
+            {wDates.map((d, i) => (
+              <div key={i} className="gc-day-label">
+                <div>{DAY_LABELS[i]}</div>
+                <div className="gc-day-num">{d.getDate()}</div>
+              </div>
+            ))}
+          </div>
+          {names.map((name, idx) => (
+            <div className="gc-week-row" key={name}>
+              <div className={`gc-week-name ${idx === 0 ? "gc-text-a" : "gc-text-b"}`}>{name}</div>
+              {wDates.map((d) => {
+                const iso = toISODate(d);
+                const entry = data.checkins[iso]?.[name];
+                const checked = !!entry;
+                const isMe = name === me;
+                const isFuture = d > today && iso !== toISODate(today);
+                const canView = checked && entry?.photo;
+
+                return (
+                  <button
+                    key={iso}
+                    disabled={(!isMe && !canView) || (isFuture && !checked)}
+                    onClick={() => {
+                      if (checked) {
+                        if (canView) setViewingPhoto({ url: entry.photo, name, date: iso });
+                      } else if (isMe) {
+                        requestPhotoForCell(iso, name);
+                      }
+                    }}
+                    style={
+                      checked && entry?.photo
+                        ? { backgroundImage: `url(${entry.photo})`, backgroundSize: "cover", backgroundPosition: "center" }
+                        : undefined
+                    }
+                    className={`gc-day-cell ${checked ? (idx === 0 ? "gc-cell-a" : "gc-cell-b") : ""} ${
+                      !isMe ? "gc-cell-readonly" : ""
+                    }`}
+                    title={checked ? "Ver foto" : isMe ? "Tomarte una foto para marcar" : `Solo ${name} puede marcar esto`}
+                  >
+                    {checked ? (
+                      <span className="gc-cell-check">
+                        <Check size={14} />
+                      </span>
+                    ) : isMe && !isFuture ? (
+                      <Camera size={14} className="gc-cell-camera-hint" />
+                    ) : null}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+        {capturing && <p className="gc-hint gc-hint-status">Guardando foto…</p>}
+        {captureError && <p className="gc-hint gc-hint-error">{captureError}</p>}
+      </section>
+
+      <section className="gc-panel gc-goal">
+        <div className="gc-goal-header">
+          <div className="gc-goal-title">
+            <Trophy size={18} />
+            <span>Meta semanal: {goal} días</span>
+          </div>
+          {!editingGoal ? (
+            <button
+              className="gc-icon-btn"
+              onClick={() => {
+                setGoalDraft(String(goal));
+                setEditingGoal(true);
+              }}
+            >
+              <Pencil size={14} />
+            </button>
+          ) : (
+            <div className="gc-goal-edit">
+              <input
+                className="gc-input gc-input-small"
+                type="number"
+                min={1}
+                max={7}
+                value={goalDraft}
+                onChange={(e) => setGoalDraft(e.target.value)}
+              />
+              <button className="gc-btn gc-btn-tiny gc-btn-primary" onClick={saveGoal}>
+                Ok
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="gc-goal-bars">
+          <GoalBar name={nameA} count={countA} goal={goal} variant="a" />
+          <GoalBar name={nameB} count={countB} goal={goal} variant="b" />
+        </div>
+
+        <button className="gc-btn gc-btn-outline" disabled={alreadyEvaluated} onClick={evaluateWeek}>
+          {alreadyEvaluated ? "Semana ya evaluada" : "Evaluar semana"}
+        </button>
+        <p className="gc-hint">
+          Si alguien no llega a la meta, le queda debiendo al otro el primer premio de su lista de deseos.
+        </p>
+      </section>
+
+      <section className="gc-panel gc-wishlist">
+        <div className="gc-goal-title">
+          <Star size={18} />
+          <span>Lista de premios</span>
+        </div>
+        <p className="gc-hint gc-hint-top">Lo que cada quien quiere recibir si gana.</p>
+
+        <WishColumn
+          label={`${me} (tú)`}
+          variant={me === nameA ? "a" : "b"}
+          items={myWishlist}
+          editable
+          onAdd={(text) => addWish(me, text)}
+          onRemove={(id) => removeWish(me, id)}
+        />
+        <WishColumn
+          label={partnerName}
+          variant={partnerName === nameA ? "a" : "b"}
+          items={partnerWishlist}
+          editable={false}
+        />
+      </section>
+
+      <section className="gc-panel gc-penalties">
+        <div className="gc-goal-title">
+          <Gift size={18} />
+          <span>Premios pendientes</span>
+        </div>
+
+        {pendingPenalties.length === 0 && <p className="gc-muted gc-empty">Nadie le debe nada a nadie… por ahora.</p>}
+
+        {pendingPenalties.map((p) => (
+          <div className="gc-penalty-row" key={p.id}>
+            <div>
+              <span className={p.from === nameA ? "gc-text-a" : "gc-text-b"}>{p.from}</span>
+              {" le debe a "}
+              <span className={p.to === nameA ? "gc-text-a" : "gc-text-b"}>{p.to}</span>
+              {": "}
+              <strong>{p.prize}</strong>
+              {p.reason && <div className="gc-penalty-reason">{p.reason}</div>}
+            </div>
+            <div className="gc-penalty-actions">
+              <button className="gc-icon-btn" onClick={() => togglePenaltyDone(p.id)} title="Marcar como pagado">
+                <Check size={16} />
+              </button>
+              <button className="gc-icon-btn gc-icon-btn-danger" onClick={() => removePenalty(p.id)} title="Eliminar">
+                <X size={16} />
+              </button>
+            </div>
+          </div>
+        ))}
+
+        {resolvedPenalties.length > 0 && (
+          <details className="gc-resolved">
+            <summary>Ya pagados ({resolvedPenalties.length})</summary>
+            {resolvedPenalties.map((p) => (
+              <div className="gc-penalty-row gc-penalty-row-done" key={p.id}>
+                <div>
+                  {p.from} → {p.to}: <strong>{p.prize}</strong>
+                </div>
+                <button className="gc-icon-btn" onClick={() => removePenalty(p.id)}>
+                  <X size={16} />
+                </button>
+              </div>
+            ))}
+          </details>
+        )}
+
+        {!penaltyForm ? (
+          <button
+            className="gc-btn gc-btn-outline gc-btn-add"
+            onClick={() => setPenaltyForm({ from: nameA, to: nameB, prize: "" })}
+          >
+            <Plus size={14} /> Agregar premio pendiente
+          </button>
+        ) : (
+          <div className="gc-penalty-form">
+            <select
+              className="gc-input"
+              value={penaltyForm.from}
+              onChange={(e) =>
+                setPenaltyForm((f) => ({
+                  ...f,
+                  from: e.target.value,
+                  to: e.target.value === nameA ? nameB : nameA,
+                  prize: "",
+                }))
+              }
+            >
+              <option value={nameA}>{nameA}</option>
+              <option value={nameB}>{nameB}</option>
+            </select>
+            <span className="gc-muted">le debe a {penaltyForm.to}</span>
+
+            {toWishlist.length > 0 ? (
+              <select
+                className="gc-input"
+                value={penaltyForm.prize}
+                onChange={(e) => setPenaltyForm((f) => ({ ...f, prize: e.target.value }))}
+              >
+                <option value="">Elegir de la lista de {penaltyForm.to}…</option>
+                {toWishlist.map((w) => (
+                  <option key={w.id} value={w.text}>
+                    {w.text}
+                  </option>
+                ))}
+                <option value="__custom__">Otro (escribir)…</option>
+              </select>
+            ) : null}
+
+            {(toWishlist.length === 0 || penaltyForm.prize === "__custom__") && (
+              <input
+                className="gc-input"
+                placeholder="¿Qué premio le debe?"
+                value={penaltyForm.prize === "__custom__" ? "" : penaltyForm.prize}
+                onChange={(e) => setPenaltyForm((f) => ({ ...f, prize: e.target.value }))}
+              />
+            )}
+
+            <div className="gc-row-gap">
+              <button
+                className="gc-btn gc-btn-primary"
+                onClick={() => {
+                  const prize = penaltyForm.prize === "__custom__" ? "" : penaltyForm.prize;
+                  addPenalty(penaltyForm.from, penaltyForm.to, prize);
+                  setPenaltyForm(null);
+                }}
+              >
+                Guardar
+              </button>
+              <button className="gc-btn gc-btn-outline" onClick={() => setPenaltyForm(null)}>
+                Cancelar
+              </button>
+            </div>
+          </div>
+        )}
+      </section>
+
+      {viewingPhoto && (
+        <div className="gc-lightbox" onClick={() => setViewingPhoto(null)}>
+          <div className="gc-lightbox-inner" onClick={(e) => e.stopPropagation()}>
+            <img src={viewingPhoto.url} alt={`${viewingPhoto.name} en el gym`} />
+            <div className="gc-lightbox-footer">
+              <span>
+                {viewingPhoto.name} · {viewingPhoto.date}
+              </span>
+              <div className="gc-row-gap">
+                {viewingPhoto.name === me && (
+                  <button
+                    className="gc-btn gc-btn-tiny gc-btn-outline"
+                    onClick={() => removeCheckin(viewingPhoto.date, viewingPhoto.name)}
+                  >
+                    Eliminar marca
+                  </button>
+                )}
+                <button className="gc-btn gc-btn-tiny gc-btn-primary" onClick={() => setViewingPhoto(null)}>
+                  Cerrar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WishColumn({ label, variant, items, editable, onAdd, onRemove }) {
+  const [text, setText] = useState("");
+  return (
+    <div className="gc-wish-col">
+      <div className={`gc-wish-label ${variant === "a" ? "gc-text-a" : "gc-text-b"}`}>{label}</div>
+      {items.length === 0 && <p className="gc-muted gc-wish-empty">Todavía no agregó nada.</p>}
+      <ul className="gc-wish-list">
+        {items.map((w) => (
+          <li key={w.id}>
+            <span>{w.text}</span>
+            {editable && (
+              <button className="gc-icon-btn" onClick={() => onRemove(w.id)} title="Quitar">
+                <X size={13} />
+              </button>
+            )}
+          </li>
+        ))}
+      </ul>
+      {editable && (
+        <div className="gc-wish-add">
+          <input
+            className="gc-input gc-input-wish"
+            placeholder="Ej. una cena, unos tenis…"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && text.trim()) {
+                onAdd(text);
+                setText("");
+              }
+            }}
+          />
+          <button
+            className="gc-icon-btn"
+            onClick={() => {
+              if (text.trim()) {
+                onAdd(text);
+                setText("");
+              }
+            }}
+          >
+            <Plus size={14} />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GoalBar({ name, count, goal, variant }) {
+  const pct = Math.min(100, Math.round((count / goal) * 100));
+  const met = count >= goal;
+  return (
+    <div className="gc-goal-bar-wrap">
+      <div className="gc-goal-bar-label">
+        <span className={variant === "a" ? "gc-text-a" : "gc-text-b"}>{name}</span>
+        <span className="gc-muted">
+          {count}/{goal} {met && "✓"}
+        </span>
+      </div>
+      <div className="gc-goal-bar-track">
+        <div className={`gc-goal-bar-fill ${variant === "a" ? "gc-fill-a" : "gc-fill-b"}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+const css = `
+.gc-app {
+  --bg: #17181a;
+  --panel: #1f2123;
+  --panel-2: #26282b;
+  --accent-a: #f2a93b;
+  --accent-a-dim: rgba(242, 169, 59, 0.16);
+  --accent-b: #2fb6a8;
+  --accent-b-dim: rgba(47, 182, 168, 0.16);
+  --text: #f2efe9;
+  --muted: #9a9c9e;
+  --success: #7cc576;
+  --danger: #e85d4e;
+  --border: rgba(255,255,255,0.09);
+
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  padding: 20px 16px 40px;
+  min-height: 100vh;
+  box-sizing: border-box;
+  max-width: 480px;
+  margin: 0 auto;
+  position: relative;
+}
+.gc-app * { box-sizing: border-box; }
+.gc-center { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+.gc-spin { animation: gc-spin 1s linear infinite; color: var(--accent-a); }
+@keyframes gc-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+.gc-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 18px;
+  margin-bottom: 14px;
+}
+
+.gc-setup { text-align: center; width: 320px; }
+.gc-setup h1 { font-size: 22px; margin: 10px 0 4px; }
+.gc-accent-icon { color: var(--accent-a); }
+.gc-muted { color: var(--muted); font-size: 13px; }
+.gc-input {
+  width: 100%;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 14px;
+  margin-top: 10px;
+}
+.gc-input-small { width: 70px; margin-top: 0; padding: 6px 8px; }
+.gc-input-wish { margin-top: 0; }
+.gc-btn {
+  border: none;
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--text);
+  background: var(--panel-2);
+}
+.gc-btn-primary { background: var(--accent-a); color: #201203; }
+.gc-btn-outline { background: transparent; border: 1px solid var(--border); width: 100%; margin-top: 10px; }
+.gc-btn-outline:disabled { opacity: 0.5; cursor: default; }
+.gc-btn-add { display: flex; align-items: center; justify-content: center; gap: 6px; }
+.gc-btn-tiny { padding: 6px 10px; font-size: 13px; width: auto; margin-top: 0; }
+.gc-who-row { display: flex; gap: 10px; margin-top: 14px; justify-content: center; }
+.gc-btn-a { background: var(--accent-a); color: #201203; }
+.gc-btn-b { background: var(--accent-b); color: #06231f; }
+
+.gc-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; gap: 12px; }
+.gc-title-row { display: flex; align-items: center; gap: 8px; }
+.gc-app-name { font-size: 17px; font-weight: 700; letter-spacing: -0.01em; }
+.gc-subtitle { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
+.gc-streak { display: flex; align-items: center; gap: 8px; }
+.gc-flame { color: var(--muted); }
+.gc-flame-lit { color: #ff8a3d; filter: drop-shadow(0 0 6px rgba(255,138,61,0.5)); }
+.gc-streak-num { font-size: 24px; font-weight: 800; line-height: 1; text-align: right; }
+.gc-streak-label { font-size: 10.5px; color: var(--muted); text-align: right; max-width: 90px; }
+
+.gc-hint-top { display: flex; align-items: center; gap: 6px; margin: 0 0 12px; }
+.gc-week-grid { display: flex; flex-direction: column; gap: 8px; }
+.gc-week-row { display: grid; grid-template-columns: 64px repeat(7, 1fr); gap: 6px; align-items: center; }
+.gc-week-name-spacer { width: 64px; }
+.gc-day-label { text-align: center; font-size: 11px; color: var(--muted); }
+.gc-day-num { font-size: 12px; color: var(--text); font-weight: 600; }
+.gc-week-name { font-size: 13px; font-weight: 700; }
+.gc-text-a { color: var(--accent-a); }
+.gc-text-b { color: var(--accent-b); }
+.gc-day-cell {
+  aspect-ratio: 1;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  display: flex; align-items: center; justify-content: center;
+  color: transparent;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+.gc-day-cell:disabled { cursor: default; }
+.gc-day-cell.gc-cell-readonly { opacity: 0.85; }
+.gc-cell-camera-hint { color: var(--muted); }
+.gc-cell-check {
+  background: rgba(0,0,0,0.45);
+  border-radius: 999px;
+  width: 20px; height: 20px;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff;
+}
+.gc-cell-a:not([style*="background-image"]) { background: var(--accent-a); border-color: var(--accent-a); }
+.gc-cell-b:not([style*="background-image"]) { background: var(--accent-b); border-color: var(--accent-b); }
+
+.gc-goal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.gc-goal-title { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14.5px; }
+.gc-goal-edit { display: flex; align-items: center; gap: 6px; }
+.gc-icon-btn {
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
+  padding: 5px; color: var(--text); cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.gc-icon-btn-danger:hover { color: var(--danger); }
+.gc-goal-bars { display: flex; flex-direction: column; gap: 10px; margin-bottom: 4px; }
+.gc-goal-bar-label { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 4px; }
+.gc-goal-bar-track { height: 8px; border-radius: 5px; background: var(--panel-2); overflow: hidden; }
+.gc-goal-bar-fill { height: 100%; border-radius: 5px; transition: width 0.3s ease; }
+.gc-fill-a { background: var(--accent-a); }
+.gc-fill-b { background: var(--accent-b); }
+.gc-hint { font-size: 12px; color: var(--muted); margin-top: 8px; margin-bottom: 0; display: flex; align-items: center; gap: 5px; }
+.gc-hint-status { color: var(--accent-a); }
+.gc-hint-error { color: var(--danger); }
+
+.gc-wish-col { margin-bottom: 14px; }
+.gc-wish-col:last-child { margin-bottom: 0; }
+.gc-wish-label { font-size: 13px; font-weight: 700; margin-bottom: 6px; }
+.gc-wish-empty { margin: 0 0 6px; }
+.gc-wish-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.gc-wish-list li {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 7px 10px; font-size: 13.5px;
+}
+.gc-wish-add { display: flex; gap: 6px; margin-top: 8px; }
+.gc-wish-add .gc-input { flex: 1; }
+
+.gc-empty { padding: 6px 0 4px; }
+.gc-penalty-row {
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 10px;
+  padding: 10px 0; border-top: 1px solid var(--border); font-size: 13.5px;
+}
+.gc-penalty-row-done { opacity: 0.55; }
+.gc-penalty-reason { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.gc-penalty-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.gc-resolved { margin-top: 6px; font-size: 12.5px; color: var(--muted); }
+.gc-resolved summary { cursor: pointer; padding: 6px 0; }
+.gc-penalty-form { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.gc-row-gap { display: flex; gap: 8px; }
+.gc-row-gap .gc-btn { flex: 1; }
+
+.gc-lightbox {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.75);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 50; padding: 20px;
+}
+.gc-lightbox-inner {
+  background: var(--panel); border-radius: 14px; overflow: hidden;
+  max-width: 340px; width: 100%;
+}
+.gc-lightbox-inner img { width: 100%; display: block; max-height: 360px; object-fit: cover; }
+.gc-lightbox-footer { padding: 12px 14px; font-size: 13px; }
+.gc-lightbox-footer > span { display: block; margin-bottom: 8px; color: var(--muted); }
+`;
