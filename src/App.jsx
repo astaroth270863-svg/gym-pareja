@@ -1,13 +1,14 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { doc, collection, onSnapshot, setDoc, deleteDoc } from "firebase/firestore";
 import { db } from "./firebase";
-import { Flame, Dumbbell, Gift, Check, Plus, X, Trophy, Pencil, Camera, Star } from "lucide-react";
+import { Flame, Dumbbell, Gift, Check, Plus, X, Trophy, Pencil, Camera, Star, Info, Share2 } from "lucide-react";
 
 const DOC_REF = doc(db, "gymCouple", "shared");
 const CHECKINS_COL = collection(db, "checkins");
 const ME_KEY = "gc:me";
 
 const DAY_LABELS = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"];
+const REACTIONS = ["🔥", "💪", "👏", "❤️"];
 
 function toISODate(d) {
   const y = d.getFullYear();
@@ -82,6 +83,8 @@ export default function GymCoupleApp() {
   const [viewingPhoto, setViewingPhoto] = useState(null);
   const [capturing, setCapturing] = useState(false);
   const [captureError, setCaptureError] = useState("");
+  const [dayChoice, setDayChoice] = useState(null); // { dateStr, name }
+  const [excuseText, setExcuseText] = useState("");
   const fileInputRef = useRef(null);
   const pendingCellRef = useRef(null);
 
@@ -108,7 +111,13 @@ export default function GymCoupleApp() {
         const d = docSnap.data();
         if (!d?.date || !d?.name) return;
         if (!map[d.date]) map[d.date] = {};
-        map[d.date][d.name] = { photo: d.photo, ts: d.ts };
+        map[d.date][d.name] = {
+          photo: d.photo || null,
+          ts: d.ts,
+          reaction: d.reaction || null,
+          type: d.type || "photo",
+          reason: d.reason || null,
+        };
       });
       setCheckinsMap(map);
     });
@@ -193,6 +202,33 @@ export default function GymCoupleApp() {
     setViewingPhoto(null);
   };
 
+  // Solo tiene sentido reaccionar a la foto del otro, no a la propia.
+  const setReaction = async (dateStr, name, emoji) => {
+    try {
+      const checkinDoc = doc(db, "checkins", `${dateStr}_${name}`);
+      await setDoc(checkinDoc, { reaction: emoji }, { merge: true });
+    } catch (e) {
+      console.error("No se pudo guardar la reacción", e);
+    }
+  };
+
+  // Un día justificado cuenta para la meta semanal (no es una falla), pero
+  // no cuenta como entrenamiento real para la racha combinada.
+  const saveExcuse = async (dateStr, name, reason) => {
+    try {
+      const checkinDoc = doc(db, "checkins", `${dateStr}_${name}`);
+      await setDoc(checkinDoc, {
+        date: dateStr,
+        name,
+        type: "excuse",
+        reason: reason.trim() || "Día justificado",
+        ts: new Date().toISOString(),
+      });
+    } catch (e) {
+      console.error("No se pudo guardar la justificación", e);
+    }
+  };
+
   const countForWeek = (name) => {
     if (!data) return 0;
     return wDates.reduce((acc, d) => {
@@ -209,7 +245,7 @@ export default function GymCoupleApp() {
     for (let i = 0; i < 3650; i++) {
       const iso = toISODate(cursor);
       const day = data.checkins[iso];
-      const bothTrained = day && names.every((n) => day[n]);
+      const bothTrained = day && names.every((n) => day[n] && day[n].type !== "excuse");
       if (bothTrained) {
         streak += 1;
         cursor.setDate(cursor.getDate() - 1);
@@ -319,6 +355,29 @@ export default function GymCoupleApp() {
     setEditingGoal(false);
   };
 
+  const shareProgress = () => {
+    if (!data?.config) return;
+    const [nA, nB] = names;
+    const cA = countForWeek(nA);
+    const cB = countForWeek(nB);
+    const lines = [
+      "💪 Rutina en Pareja",
+      `Racha juntos: ${comboStreak} días 🔥`,
+      `Esta semana: ${nA} ${cA}/${data.goal} · ${nB} ${cB}/${data.goal}`,
+    ];
+    const pending = data.penalties.filter((p) => !p.done);
+    if (pending.length > 0) {
+      lines.push("Premios pendientes:");
+      pending.forEach((p) => lines.push(`- ${p.from} le debe a ${p.to}: ${p.prize}`));
+    }
+    const text = lines.join("\n");
+    if (navigator.share) {
+      navigator.share({ text, title: "Rutina en Pareja" }).catch(() => {});
+    } else {
+      window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank");
+    }
+  };
+
   if (loading) {
     return (
       <div className="gc-app gc-center">
@@ -411,18 +470,23 @@ export default function GymCoupleApp() {
             {nameA} &amp; {nameB} · tú eres {me}
           </div>
         </div>
-        <div className="gc-streak">
-          <Flame size={28} className={comboStreak > 0 ? "gc-flame-lit" : "gc-flame"} />
-          <div>
-            <div className="gc-streak-num">{comboStreak}</div>
-            <div className="gc-streak-label">días seguidos juntos</div>
+        <div className="gc-header-right">
+          <button className="gc-icon-btn" onClick={shareProgress} title="Compartir progreso">
+            <Share2 size={16} />
+          </button>
+          <div className="gc-streak">
+            <Flame size={28} className={comboStreak > 0 ? "gc-flame-lit" : "gc-flame"} />
+            <div>
+              <div className="gc-streak-num">{comboStreak}</div>
+              <div className="gc-streak-label">días seguidos juntos</div>
+            </div>
           </div>
         </div>
       </header>
 
       <section className="gc-panel gc-week">
         <p className="gc-hint gc-hint-top">
-          <Camera size={13} /> Para marcar un día tienes que tomarte una foto en el gym.
+          <Camera size={13} /> Toca tu día para tomarte una foto o justificarlo.
         </p>
         <div className="gc-week-grid">
           <div className="gc-week-row gc-week-row-labels">
@@ -441,9 +505,10 @@ export default function GymCoupleApp() {
                 const iso = toISODate(d);
                 const entry = data.checkins[iso]?.[name];
                 const checked = !!entry;
+                const isExcuse = entry?.type === "excuse";
                 const isMe = name === me;
                 const isFuture = d > today && iso !== toISODate(today);
-                const canView = checked && entry?.photo;
+                const canView = checked;
 
                 return (
                   <button
@@ -451,9 +516,9 @@ export default function GymCoupleApp() {
                     disabled={(!isMe && !canView) || (isFuture && !checked)}
                     onClick={() => {
                       if (checked) {
-                        if (canView) setViewingPhoto({ url: entry.photo, name, date: iso });
+                        if (canView) setViewingPhoto({ name, date: iso });
                       } else if (isMe) {
-                        requestPhotoForCell(iso, name);
+                        setDayChoice({ dateStr: iso, name });
                       }
                     }}
                     style={
@@ -461,18 +526,31 @@ export default function GymCoupleApp() {
                         ? { backgroundImage: `url(${entry.photo})`, backgroundSize: "cover", backgroundPosition: "center" }
                         : undefined
                     }
-                    className={`gc-day-cell ${checked ? (idx === 0 ? "gc-cell-a" : "gc-cell-b") : ""} ${
-                      !isMe ? "gc-cell-readonly" : ""
-                    }`}
-                    title={checked ? "Ver foto" : isMe ? "Tomarte una foto para marcar" : `Solo ${name} puede marcar esto`}
+                    className={`gc-day-cell ${
+                      checked ? (isExcuse ? "gc-cell-excuse" : idx === 0 ? "gc-cell-a" : "gc-cell-b") : ""
+                    } ${!isMe ? "gc-cell-readonly" : ""}`}
+                    title={
+                      checked
+                        ? isExcuse
+                          ? "Día justificado"
+                          : "Ver foto"
+                        : isMe
+                        ? "Marcar este día"
+                        : `Solo ${name} puede marcar esto`
+                    }
                   >
                     {checked ? (
-                      <span className="gc-cell-check">
-                        <Check size={14} />
-                      </span>
+                      isExcuse ? (
+                        <Info size={14} />
+                      ) : (
+                        <span className="gc-cell-check">
+                          <Check size={14} />
+                        </span>
+                      )
                     ) : isMe && !isFuture ? (
                       <Camera size={14} className="gc-cell-camera-hint" />
                     ) : null}
+                    {entry?.reaction && <span className="gc-cell-reaction">{entry.reaction}</span>}
                   </button>
                 );
               })}
@@ -583,15 +661,13 @@ export default function GymCoupleApp() {
 
         {resolvedPenalties.length > 0 && (
           <details className="gc-resolved">
-            <summary>Ya pagados ({resolvedPenalties.length})</summary>
+            <summary>Historial de premios cobrados ({resolvedPenalties.length})</summary>
             {resolvedPenalties.map((p) => (
               <div className="gc-penalty-row gc-penalty-row-done" key={p.id}>
                 <div>
                   {p.from} → {p.to}: <strong>{p.prize}</strong>
+                  <div className="gc-penalty-reason">{p.date}</div>
                 </div>
-                <button className="gc-icon-btn" onClick={() => removePenalty(p.id)}>
-                  <X size={16} />
-                </button>
               </div>
             ))}
           </details>
@@ -667,31 +743,108 @@ export default function GymCoupleApp() {
         )}
       </section>
 
-      {viewingPhoto && (
-        <div className="gc-lightbox" onClick={() => setViewingPhoto(null)}>
-          <div className="gc-lightbox-inner" onClick={(e) => e.stopPropagation()}>
-            <img src={viewingPhoto.url} alt={`${viewingPhoto.name} en el gym`} />
+      {dayChoice && (
+        <div
+          className="gc-lightbox"
+          onClick={() => {
+            setDayChoice(null);
+            setExcuseText("");
+          }}
+        >
+          <div className="gc-lightbox-inner gc-choice-inner" onClick={(e) => e.stopPropagation()}>
             <div className="gc-lightbox-footer">
-              <span>
-                {viewingPhoto.name} · {viewingPhoto.date}
-              </span>
+              <span>¿Cómo marcamos este día?</span>
               <div className="gc-row-gap">
-                {viewingPhoto.name === me && (
-                  <button
-                    className="gc-btn gc-btn-tiny gc-btn-outline"
-                    onClick={() => removeCheckin(viewingPhoto.date, viewingPhoto.name)}
-                  >
-                    Eliminar marca
-                  </button>
-                )}
-                <button className="gc-btn gc-btn-tiny gc-btn-primary" onClick={() => setViewingPhoto(null)}>
-                  Cerrar
+                <button
+                  className="gc-btn gc-btn-primary"
+                  onClick={() => {
+                    requestPhotoForCell(dayChoice.dateStr, dayChoice.name);
+                    setDayChoice(null);
+                  }}
+                >
+                  <Camera size={14} /> Tomar foto
+                </button>
+              </div>
+              <p className="gc-hint gc-choice-or">o si no pudiste ir:</p>
+              <input
+                className="gc-input"
+                placeholder="Motivo (ej. lesión, viaje)"
+                value={excuseText}
+                onChange={(e) => setExcuseText(e.target.value)}
+              />
+              <div className="gc-row-gap">
+                <button
+                  className="gc-btn gc-btn-outline"
+                  onClick={() => {
+                    saveExcuse(dayChoice.dateStr, dayChoice.name, excuseText);
+                    setDayChoice(null);
+                    setExcuseText("");
+                  }}
+                >
+                  <Info size={14} /> Justificar día
                 </button>
               </div>
             </div>
           </div>
         </div>
       )}
+
+      {viewingPhoto &&
+        (() => {
+          const viewEntry = data.checkins[viewingPhoto.date]?.[viewingPhoto.name];
+          if (!viewEntry) return null;
+          const isMyPhoto = viewingPhoto.name === me;
+          const isExcuse = viewEntry.type === "excuse";
+          return (
+            <div className="gc-lightbox" onClick={() => setViewingPhoto(null)}>
+              <div className="gc-lightbox-inner" onClick={(e) => e.stopPropagation()}>
+                {isExcuse ? (
+                  <div className="gc-excuse-view">
+                    <Info size={22} />
+                    <p>{viewEntry.reason}</p>
+                  </div>
+                ) : (
+                  <img src={viewEntry.photo} alt={`${viewingPhoto.name} en el gym`} />
+                )}
+                <div className="gc-lightbox-footer">
+                  <span>
+                    {viewingPhoto.name} · {viewingPhoto.date} {isExcuse && "· justificado"}
+                  </span>
+
+                  {!isMyPhoto && !isExcuse && (
+                    <div className="gc-reaction-row">
+                      {REACTIONS.map((emoji) => (
+                        <button
+                          key={emoji}
+                          className={`gc-reaction-btn ${viewEntry.reaction === emoji ? "gc-reaction-active" : ""}`}
+                          onClick={() =>
+                            setReaction(viewingPhoto.date, viewingPhoto.name, viewEntry.reaction === emoji ? null : emoji)
+                          }
+                        >
+                          {emoji}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="gc-row-gap">
+                    {isMyPhoto && (
+                      <button
+                        className="gc-btn gc-btn-tiny gc-btn-outline"
+                        onClick={() => removeCheckin(viewingPhoto.date, viewingPhoto.name)}
+                      >
+                        Eliminar marca
+                      </button>
+                    )}
+                    <button className="gc-btn gc-btn-tiny gc-btn-primary" onClick={() => setViewingPhoto(null)}>
+                      Cerrar
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
     </div>
   );
 }
@@ -837,6 +990,7 @@ const css = `
 .gc-btn-b { background: var(--accent-b); color: #06231f; }
 
 .gc-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; gap: 12px; }
+.gc-header-right { display: flex; align-items: center; gap: 10px; }
 .gc-title-row { display: flex; align-items: center; gap: 8px; }
 .gc-app-name { font-size: 17px; font-weight: 700; letter-spacing: -0.01em; }
 .gc-subtitle { color: var(--muted); font-size: 12.5px; margin-top: 2px; }
@@ -878,6 +1032,17 @@ const css = `
 }
 .gc-cell-a:not([style*="background-image"]) { background: var(--accent-a); border-color: var(--accent-a); }
 .gc-cell-b:not([style*="background-image"]) { background: var(--accent-b); border-color: var(--accent-b); }
+.gc-cell-reaction {
+  position: absolute; bottom: -2px; right: -2px;
+  font-size: 13px; line-height: 1;
+  background: var(--panel); border-radius: 999px;
+  width: 18px; height: 18px; display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 0 0 2px var(--panel);
+}
+.gc-cell-excuse {
+  background: repeating-linear-gradient(45deg, var(--panel-2), var(--panel-2) 6px, #2f3134 6px, #2f3134 12px);
+  color: var(--muted);
+}
 
 .gc-goal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .gc-goal-title { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14.5px; }
@@ -936,4 +1101,19 @@ const css = `
 .gc-lightbox-inner img { width: 100%; display: block; max-height: 360px; object-fit: cover; }
 .gc-lightbox-footer { padding: 12px 14px; font-size: 13px; }
 .gc-lightbox-footer > span { display: block; margin-bottom: 8px; color: var(--muted); }
+.gc-reaction-row { display: flex; gap: 8px; margin-bottom: 10px; }
+.gc-reaction-btn {
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+  font-size: 18px; padding: 6px 10px; cursor: pointer; line-height: 1;
+}
+.gc-reaction-active { background: var(--accent-a-dim); border-color: var(--accent-a); }
+
+.gc-choice-inner { max-width: 300px; }
+.gc-choice-or { justify-content: center; margin: 10px 0; }
+.gc-btn-primary, .gc-btn-outline { display: flex; align-items: center; justify-content: center; gap: 6px; }
+.gc-excuse-view {
+  padding: 30px 20px; display: flex; flex-direction: column; align-items: center; gap: 10px;
+  color: var(--muted); text-align: center;
+}
+.gc-excuse-view p { margin: 0; color: var(--text); font-size: 14px; }
 `;
