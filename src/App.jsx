@@ -839,9 +839,16 @@ export default function GymCoupleApp() {
                               setReactionDraft("");
                             }
                           }}
+                          onBlur={() => {
+                            if (reactionDraft.trim()) {
+                              setReaction(viewingPhoto.date, viewingPhoto.name, reactionDraft.trim());
+                              setReactionDraft("");
+                            }
+                          }}
                         />
                         <button
                           className="gc-icon-btn"
+                          onMouseDown={(e) => e.preventDefault()}
                           onClick={() => {
                             if (reactionDraft.trim()) {
                               setReaction(viewingPhoto.date, viewingPhoto.name, reactionDraft.trim());
@@ -852,6 +859,9 @@ export default function GymCoupleApp() {
                           <Check size={14} />
                         </button>
                       </div>
+                      {viewEntry.reaction && !REACTIONS.includes(viewEntry.reaction) && (
+                        <p className="gc-hint gc-current-reaction">Reacción actual: {viewEntry.reaction}</p>
+                      )}
                     </>
                   )}
 
@@ -1143,6 +1153,7 @@ const css = `
 .gc-reaction-active { background: var(--accent-a-dim); border-color: var(--accent-a); }
 .gc-reaction-custom { display: flex; gap: 6px; margin-bottom: 10px; }
 .gc-input-emoji { margin-top: 0; font-size: 16px; }
+.gc-current-reaction { margin: 0 0 10px; }
 
 .gc-choice-inner { max-width: 300px; }
 .gc-choice-or { justify-content: center; margin: 10px 0; }
