@@ -85,6 +85,7 @@ export default function GymCoupleApp() {
   const [captureError, setCaptureError] = useState("");
   const [dayChoice, setDayChoice] = useState(null); // { dateStr, name }
   const [excuseText, setExcuseText] = useState("");
+  const [reactionDraft, setReactionDraft] = useState("");
   const fileInputRef = useRef(null);
   const pendingCellRef = useRef(null);
 
@@ -796,7 +797,7 @@ export default function GymCoupleApp() {
           const isMyPhoto = viewingPhoto.name === me;
           const isExcuse = viewEntry.type === "excuse";
           return (
-            <div className="gc-lightbox" onClick={() => setViewingPhoto(null)}>
+            <div className="gc-lightbox" onClick={() => { setViewingPhoto(null); setReactionDraft(""); }}>
               <div className="gc-lightbox-inner" onClick={(e) => e.stopPropagation()}>
                 {isExcuse ? (
                   <div className="gc-excuse-view">
@@ -812,19 +813,46 @@ export default function GymCoupleApp() {
                   </span>
 
                   {!isMyPhoto && !isExcuse && (
-                    <div className="gc-reaction-row">
-                      {REACTIONS.map((emoji) => (
+                    <>
+                      <div className="gc-reaction-row">
+                        {REACTIONS.map((emoji) => (
+                          <button
+                            key={emoji}
+                            className={`gc-reaction-btn ${viewEntry.reaction === emoji ? "gc-reaction-active" : ""}`}
+                            onClick={() =>
+                              setReaction(viewingPhoto.date, viewingPhoto.name, viewEntry.reaction === emoji ? null : emoji)
+                            }
+                          >
+                            {emoji}
+                          </button>
+                        ))}
+                      </div>
+                      <div className="gc-reaction-custom">
+                        <input
+                          className="gc-input gc-input-emoji"
+                          placeholder="Otro emoji…"
+                          value={reactionDraft}
+                          onChange={(e) => setReactionDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && reactionDraft.trim()) {
+                              setReaction(viewingPhoto.date, viewingPhoto.name, reactionDraft.trim());
+                              setReactionDraft("");
+                            }
+                          }}
+                        />
                         <button
-                          key={emoji}
-                          className={`gc-reaction-btn ${viewEntry.reaction === emoji ? "gc-reaction-active" : ""}`}
-                          onClick={() =>
-                            setReaction(viewingPhoto.date, viewingPhoto.name, viewEntry.reaction === emoji ? null : emoji)
-                          }
+                          className="gc-icon-btn"
+                          onClick={() => {
+                            if (reactionDraft.trim()) {
+                              setReaction(viewingPhoto.date, viewingPhoto.name, reactionDraft.trim());
+                              setReactionDraft("");
+                            }
+                          }}
                         >
-                          {emoji}
+                          <Check size={14} />
                         </button>
-                      ))}
-                    </div>
+                      </div>
+                    </>
                   )}
 
                   <div className="gc-row-gap">
@@ -836,7 +864,13 @@ export default function GymCoupleApp() {
                         Eliminar marca
                       </button>
                     )}
-                    <button className="gc-btn gc-btn-tiny gc-btn-primary" onClick={() => setViewingPhoto(null)}>
+                    <button
+                      className="gc-btn gc-btn-tiny gc-btn-primary"
+                      onClick={() => {
+                        setViewingPhoto(null);
+                        setReactionDraft("");
+                      }}
+                    >
                       Cerrar
                     </button>
                   </div>
@@ -1107,6 +1141,8 @@ const css = `
   font-size: 18px; padding: 6px 10px; cursor: pointer; line-height: 1;
 }
 .gc-reaction-active { background: var(--accent-a-dim); border-color: var(--accent-a); }
+.gc-reaction-custom { display: flex; gap: 6px; margin-bottom: 10px; }
+.gc-input-emoji { margin-top: 0; font-size: 16px; }
 
 .gc-choice-inner { max-width: 300px; }
 .gc-choice-or { justify-content: center; margin: 10px 0; }
