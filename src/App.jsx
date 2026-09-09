@@ -1,13 +1,36 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { doc, collection, onSnapshot, setDoc, deleteDoc } from "firebase/firestore";
 import { db } from "./firebase";
-import { Flame, Dumbbell, Gift, Check, Plus, X, Trophy, Pencil, Camera, Star, Info, Share2 } from "lucide-react";
+import {
+  Flame,
+  Dumbbell,
+  Gift,
+  Check,
+  Plus,
+  X,
+  Trophy,
+  Pencil,
+  Camera,
+  Star,
+  Info,
+  Share2,
+  Settings,
+  ChevronLeft,
+  ChevronRight,
+  BarChart3,
+  Award,
+  Lock,
+} from "lucide-react";
 
 const DOC_REF = doc(db, "gymCouple", "shared");
 const CHECKINS_COL = collection(db, "checkins");
 const ME_KEY = "gc:me";
 
 const DAY_LABELS = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"];
+const MONTH_LABELS = [
+  "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+  "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+];
 const REACTIONS = ["🔥", "💪", "👏", "❤️"];
 
 function toISODate(d) {
@@ -61,6 +84,70 @@ function fileToCompressedDataURL(file, maxWidth = 320, quality = 0.55) {
   });
 }
 
+// Racha hacia atrás desde "today", contando solo días donde testFn(día) es verdadero.
+function computeStreak(checkinsMap, today, testFn) {
+  let streak = 0;
+  let cursor = new Date(today);
+  cursor.setHours(0, 0, 0, 0);
+  const todayIso = toISODate(today);
+  for (let i = 0; i < 3650; i++) {
+    const iso = toISODate(cursor);
+    const day = checkinsMap[iso];
+    const ok = day && testFn(day);
+    if (ok) {
+      streak += 1;
+      cursor.setDate(cursor.getDate() - 1);
+    } else if (iso === todayIso) {
+      cursor.setDate(cursor.getDate() - 1);
+    } else {
+      break;
+    }
+  }
+  return streak;
+}
+
+// Mejor racha histórica (no solo la actual): recorre todas las fechas con
+// datos y busca la corrida de días consecutivos más larga.
+function bestStreakEver(checkinsMap, testFn) {
+  const dates = Object.keys(checkinsMap)
+    .filter((iso) => testFn(checkinsMap[iso]))
+    .sort();
+  let best = 0;
+  let run = 0;
+  let prev = null;
+  for (const iso of dates) {
+    const d = new Date(iso + "T00:00:00");
+    if (prev) {
+      const diffDays = Math.round((d - prev) / 86400000);
+      run = diffDays === 1 ? run + 1 : 1;
+    } else {
+      run = 1;
+    }
+    best = Math.max(best, run);
+    prev = d;
+  }
+  return best;
+}
+
+function startOfMonth(date) {
+  return new Date(date.getFullYear(), date.getMonth(), 1);
+}
+
+function buildMonthGrid(monthCursor) {
+  const first = startOfMonth(monthCursor);
+  const daysInMonth = new Date(monthCursor.getFullYear(), monthCursor.getMonth() + 1, 0).getDate();
+  const leadingBlanks = (first.getDay() + 6) % 7; // lunes = 0
+  const cells = [];
+  for (let i = 0; i < leadingBlanks; i++) cells.push(null);
+  for (let day = 1; day <= daysInMonth; day++) {
+    cells.push(new Date(monthCursor.getFullYear(), monthCursor.getMonth(), day));
+  }
+  while (cells.length % 7 !== 0) cells.push(null);
+  const weeks = [];
+  for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7));
+  return weeks;
+}
+
 const DEFAULT_DATA = {
   config: null,
   checkins: {},
@@ -71,8 +158,8 @@ const DEFAULT_DATA = {
 };
 
 export default function GymCoupleApp() {
-  const [meta, setMeta] = useState(null); // config, goal, evaluatedWeeks, penalties, wishlists
-  const [checkinsMap, setCheckinsMap] = useState({}); // { "YYYY-MM-DD": { [name]: { photo, ts } } }
+  const [meta, setMeta] = useState(null);
+  const [checkinsMap, setCheckinsMap] = useState({});
   const [me, setMe] = useState(null);
   const [loading, setLoading] = useState(true);
   const [setupNames, setSetupNames] = useState({ a: "", b: "" });
@@ -86,14 +173,14 @@ export default function GymCoupleApp() {
   const [dayChoice, setDayChoice] = useState(null); // { dateStr, name }
   const [excuseText, setExcuseText] = useState("");
   const [reactionDraft, setReactionDraft] = useState("");
+  const [pendingPhoto, setPendingPhoto] = useState(null); // { dateStr, name, compressed }
+  const [noteDraft, setNoteDraft] = useState("");
+  const [monthCursor, setMonthCursor] = useState(() => startOfMonth(new Date()));
+  const [editingNames, setEditingNames] = useState(false);
+  const [nameDraft, setNameDraft] = useState({ a: "", b: "" });
   const fileInputRef = useRef(null);
   const pendingCellRef = useRef(null);
 
-  // Sincronización en vivo con Firestore: si tu pareja marca un día desde
-  // su celular, a ti se te actualiza solo, sin recargar la página.
-  // Cada check-in (foto incluida) vive en su propio documento chiquito
-  // dentro de la colección "checkins", así el documento compartido nunca
-  // crece demasiado y no hace falta Firebase Storage (que pide tarjeta).
   useEffect(() => {
     const unsubMeta = onSnapshot(
       DOC_REF,
@@ -118,6 +205,7 @@ export default function GymCoupleApp() {
           reaction: d.reaction || null,
           type: d.type || "photo",
           reason: d.reason || null,
+          note: d.note || null,
         };
       });
       setCheckinsMap(map);
@@ -132,7 +220,6 @@ export default function GymCoupleApp() {
 
   const data = meta ? { ...DEFAULT_DATA, ...meta, checkins: checkinsMap } : null;
 
-  // Guarda todo excepto los check-ins (esos van aparte, ver arriba).
   const persist = useCallback(async (next) => {
     const { checkins, ...metaOnly } = next;
     try {
@@ -176,21 +263,32 @@ export default function GymCoupleApp() {
     setCaptureError("");
     try {
       const compressed = await fileToCompressedDataURL(file);
-      // Un documento chiquito por día+persona, dentro de la colección
-      // "checkins". La foto comprimida pesa unos 20-40 KB, muy por debajo
-      // del límite de 1 MB por documento de Firestore.
-      const checkinDoc = doc(db, "checkins", `${cell.dateStr}_${cell.name}`);
+      setPendingPhoto({ dateStr: cell.dateStr, name: cell.name, compressed });
+    } catch (err) {
+      console.error(err);
+      setCaptureError("No se pudo procesar la foto, intenta de nuevo.");
+    } finally {
+      setCapturing(false);
+    }
+  };
+
+  const confirmPendingPhoto = async () => {
+    if (!pendingPhoto) return;
+    try {
+      const checkinDoc = doc(db, "checkins", `${pendingPhoto.dateStr}_${pendingPhoto.name}`);
       await setDoc(checkinDoc, {
-        date: cell.dateStr,
-        name: cell.name,
-        photo: compressed,
+        date: pendingPhoto.dateStr,
+        name: pendingPhoto.name,
+        photo: pendingPhoto.compressed,
+        note: noteDraft.trim() || null,
         ts: new Date().toISOString(),
       });
     } catch (err) {
       console.error(err);
       setCaptureError("No se pudo guardar la foto, intenta de nuevo.");
     } finally {
-      setCapturing(false);
+      setPendingPhoto(null);
+      setNoteDraft("");
     }
   };
 
@@ -203,7 +301,6 @@ export default function GymCoupleApp() {
     setViewingPhoto(null);
   };
 
-  // Solo tiene sentido reaccionar a la foto del otro, no a la propia.
   const setReaction = async (dateStr, name, emoji) => {
     try {
       const checkinDoc = doc(db, "checkins", `${dateStr}_${name}`);
@@ -213,8 +310,6 @@ export default function GymCoupleApp() {
     }
   };
 
-  // Un día justificado cuenta para la meta semanal (no es una falla), pero
-  // no cuenta como entrenamiento real para la racha combinada.
   const saveExcuse = async (dateStr, name, reason) => {
     try {
       const checkinDoc = doc(db, "checkins", `${dateStr}_${name}`);
@@ -240,24 +335,23 @@ export default function GymCoupleApp() {
 
   const comboStreak = useMemo(() => {
     if (!data || names.length < 2) return 0;
-    let streak = 0;
-    let cursor = new Date(today);
-    cursor.setHours(0, 0, 0, 0);
-    for (let i = 0; i < 3650; i++) {
-      const iso = toISODate(cursor);
-      const day = data.checkins[iso];
-      const bothTrained = day && names.every((n) => day[n] && day[n].type !== "excuse");
-      if (bothTrained) {
-        streak += 1;
-        cursor.setDate(cursor.getDate() - 1);
-      } else if (iso === toISODate(today)) {
-        cursor.setDate(cursor.getDate() - 1);
-      } else {
-        break;
-      }
-    }
-    return streak;
+    return computeStreak(data.checkins, today, (day) => names.every((n) => day[n] && day[n].type !== "excuse"));
   }, [data, names, today]);
+
+  const individualStreak = (name) => {
+    if (!data) return 0;
+    return computeStreak(data.checkins, today, (day) => day[name] && day[name].type !== "excuse");
+  };
+
+  const bestComboStreakEver = useMemo(() => {
+    if (!data || names.length < 2) return 0;
+    return bestStreakEver(data.checkins, (day) => names.every((n) => day[n] && day[n].type !== "excuse"));
+  }, [data, names]);
+
+  const totalTrained = (name) => {
+    if (!data) return 0;
+    return Object.values(data.checkins).filter((day) => day[name] && day[name].type !== "excuse").length;
+  };
 
   const wishlistFor = (name) => data?.wishlists?.[name] || [];
 
@@ -356,6 +450,14 @@ export default function GymCoupleApp() {
     setEditingGoal(false);
   };
 
+  const saveNames = () => {
+    const a = nameDraft.a.trim();
+    const b = nameDraft.b.trim();
+    if (!a || !b) return;
+    persist({ ...data, config: { nameA: a, nameB: b } });
+    setEditingNames(false);
+  };
+
   const shareProgress = () => {
     if (!data?.config) return;
     const [nA, nB] = names;
@@ -447,6 +549,44 @@ export default function GymCoupleApp() {
   const partnerName = me === nameA ? nameB : nameA;
   const partnerWishlist = wishlistFor(partnerName);
   const toWishlist = penaltyForm ? wishlistFor(penaltyForm.to) : [];
+  const todayIso = toISODate(today);
+  const iCheckedInToday = !!data.checkins[todayIso]?.[me];
+  const showReminder = !iCheckedInToday && today.getHours() >= 18;
+  const monthWeeks = buildMonthGrid(monthCursor);
+  const isCurrentMonth = monthCursor.getFullYear() === today.getFullYear() && monthCursor.getMonth() === today.getMonth();
+
+  const ACHIEVEMENTS = [
+    {
+      id: "streak7",
+      icon: "🔥",
+      label: "Racha de 7 días",
+      shared: true,
+      earned: bestComboStreakEver >= 7,
+    },
+    {
+      id: "streak30",
+      icon: "🔥🔥",
+      label: "Racha de 30 días",
+      shared: true,
+      earned: bestComboStreakEver >= 30,
+    },
+    {
+      id: "weeks1",
+      icon: "🏆",
+      label: "Primera semana evaluada",
+      shared: true,
+      earned: data.evaluatedWeeks.length >= 1,
+    },
+    {
+      id: "weeks5",
+      icon: "🏆🏆",
+      label: "5 semanas evaluadas",
+      shared: true,
+      earned: data.evaluatedWeeks.length >= 5,
+    },
+    { id: "trained10", icon: "📸", label: "10 entrenamientos", earned10: true },
+    { id: "trained50", icon: "📸📸", label: "50 entrenamientos", earned50: true },
+  ];
 
   return (
     <div className="gc-app">
@@ -472,6 +612,16 @@ export default function GymCoupleApp() {
           </div>
         </div>
         <div className="gc-header-right">
+          <button
+            className="gc-icon-btn"
+            onClick={() => {
+              setNameDraft({ a: nameA, b: nameB });
+              setEditingNames(true);
+            }}
+            title="Editar nombres"
+          >
+            <Settings size={16} />
+          </button>
           <button className="gc-icon-btn" onClick={shareProgress} title="Compartir progreso">
             <Share2 size={16} />
           </button>
@@ -484,6 +634,12 @@ export default function GymCoupleApp() {
           </div>
         </div>
       </header>
+
+      {showReminder && (
+        <div className="gc-reminder">
+          ⏰ Todavía no marcas tu día de hoy. ¿Vas a ir al gym?
+        </div>
+      )}
 
       <section className="gc-panel gc-week">
         <p className="gc-hint gc-hint-top">
@@ -501,7 +657,12 @@ export default function GymCoupleApp() {
           </div>
           {names.map((name, idx) => (
             <div className="gc-week-row" key={name}>
-              <div className={`gc-week-name ${idx === 0 ? "gc-text-a" : "gc-text-b"}`}>{name}</div>
+              <div className={`gc-week-name ${idx === 0 ? "gc-text-a" : "gc-text-b"}`}>
+                {name}
+                <span className="gc-mini-streak" title="Racha individual">
+                  🔥{individualStreak(name)}
+                </span>
+              </div>
               {wDates.map((d) => {
                 const iso = toISODate(d);
                 const entry = data.checkins[iso]?.[name];
@@ -558,8 +719,116 @@ export default function GymCoupleApp() {
             </div>
           ))}
         </div>
-        {capturing && <p className="gc-hint gc-hint-status">Guardando foto…</p>}
+        {capturing && <p className="gc-hint gc-hint-status">Procesando foto…</p>}
         {captureError && <p className="gc-hint gc-hint-error">{captureError}</p>}
+      </section>
+
+      <section className="gc-panel gc-month">
+        <div className="gc-goal-title">
+          <BarChart3 size={18} />
+          <span>Vista mensual</span>
+        </div>
+        <div className="gc-month-nav">
+          <button
+            className="gc-icon-btn"
+            onClick={() => setMonthCursor((c) => new Date(c.getFullYear(), c.getMonth() - 1, 1))}
+          >
+            <ChevronLeft size={16} />
+          </button>
+          <span className="gc-month-label">
+            {MONTH_LABELS[monthCursor.getMonth()]} {monthCursor.getFullYear()}
+          </span>
+          <button
+            className="gc-icon-btn"
+            onClick={() => setMonthCursor((c) => new Date(c.getFullYear(), c.getMonth() + 1, 1))}
+          >
+            <ChevronRight size={16} />
+          </button>
+        </div>
+        <div className="gc-month-daylabels">
+          {DAY_LABELS.map((l) => (
+            <span key={l}>{l[0]}</span>
+          ))}
+        </div>
+        {monthWeeks.map((week, wi) => (
+          <div className="gc-month-row" key={wi}>
+            {week.map((d, di) => {
+              if (!d) return <div className="gc-month-cell gc-month-blank" key={di} />;
+              const iso = toISODate(d);
+              const isToday = isCurrentMonth && d.getDate() === today.getDate();
+              const dayEntry = data.checkins[iso] || {};
+              return (
+                <div className={`gc-month-cell ${isToday ? "gc-month-today" : ""}`} key={di}>
+                  <span className="gc-month-daynum">{d.getDate()}</span>
+                  <div className="gc-month-dots">
+                    <span className={`gc-dot gc-dot-a ${dayEntry[nameA] ? "gc-dot-filled" : ""}`} />
+                    <span className={`gc-dot gc-dot-b ${dayEntry[nameB] ? "gc-dot-filled" : ""}`} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ))}
+      </section>
+
+      <section className="gc-panel gc-stats">
+        <div className="gc-goal-title">
+          <Trophy size={18} />
+          <span>Estadísticas</span>
+        </div>
+        <div className="gc-stats-grid">
+          <div className="gc-stat">
+            <div className="gc-stat-num">{comboStreak}</div>
+            <div className="gc-stat-label">Racha actual</div>
+          </div>
+          <div className="gc-stat">
+            <div className="gc-stat-num">{bestComboStreakEver}</div>
+            <div className="gc-stat-label">Mejor racha histórica</div>
+          </div>
+          <div className="gc-stat">
+            <div className="gc-stat-num gc-text-a">{totalTrained(nameA)}</div>
+            <div className="gc-stat-label">Días de {nameA}</div>
+          </div>
+          <div className="gc-stat">
+            <div className="gc-stat-num gc-text-b">{totalTrained(nameB)}</div>
+            <div className="gc-stat-label">Días de {nameB}</div>
+          </div>
+          <div className="gc-stat">
+            <div className="gc-stat-num">{data.evaluatedWeeks.length}</div>
+            <div className="gc-stat-label">Semanas evaluadas</div>
+          </div>
+          <div className="gc-stat">
+            <div className="gc-stat-num">{resolvedPenalties.length}</div>
+            <div className="gc-stat-label">Premios cobrados</div>
+          </div>
+        </div>
+      </section>
+
+      <section className="gc-panel gc-achievements">
+        <div className="gc-goal-title">
+          <Award size={18} />
+          <span>Logros</span>
+        </div>
+        <div className="gc-achv-grid">
+          {ACHIEVEMENTS.filter((a) => a.shared).map((a) => (
+            <div className={`gc-achv ${a.earned ? "gc-achv-earned" : ""}`} key={a.id}>
+              <span className="gc-achv-icon">{a.earned ? a.icon : <Lock size={16} />}</span>
+              <span className="gc-achv-label">{a.label}</span>
+            </div>
+          ))}
+          {names.map((name) => (
+            <div className={`gc-achv ${totalTrained(name) >= 10 ? "gc-achv-earned" : ""}`} key={`${name}-10`}>
+              <span className="gc-achv-icon">{totalTrained(name) >= 10 ? "📸" : <Lock size={16} />}</span>
+              <span className="gc-achv-label">{name}: 10 entrenamientos</span>
+            </div>
+          ))}
+          {names.map((name) => (
+            <div className={`gc-achv ${totalTrained(name) >= 50 ? "gc-achv-earned" : ""}`} key={`${name}-50`}>
+              <span className="gc-achv-icon">{totalTrained(name) >= 50 ? "📸📸" : <Lock size={16} />}</span>
+              <span className="gc-achv-label">{name}: 50 entrenamientos</span>
+            </div>
+          ))}
+        </div>
       </section>
 
       <section className="gc-panel gc-goal">
@@ -744,6 +1013,74 @@ export default function GymCoupleApp() {
         )}
       </section>
 
+      {editingNames && (
+        <div className="gc-lightbox" onClick={() => setEditingNames(false)}>
+          <div className="gc-lightbox-inner gc-choice-inner" onClick={(e) => e.stopPropagation()}>
+            <div className="gc-lightbox-footer">
+              <span>Editar nombres</span>
+              <input
+                className="gc-input"
+                value={nameDraft.a}
+                onChange={(e) => setNameDraft((n) => ({ ...n, a: e.target.value }))}
+              />
+              <input
+                className="gc-input"
+                value={nameDraft.b}
+                onChange={(e) => setNameDraft((n) => ({ ...n, b: e.target.value }))}
+              />
+              <p className="gc-hint">
+                Cambiar un nombre aquí no le cambia el nombre a los días que ya marcaste con el nombre anterior.
+              </p>
+              <div className="gc-row-gap">
+                <button className="gc-btn gc-btn-primary" onClick={saveNames}>
+                  Guardar
+                </button>
+                <button className="gc-btn gc-btn-outline" onClick={() => setEditingNames(false)}>
+                  Cancelar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pendingPhoto && (
+        <div
+          className="gc-lightbox"
+          onClick={() => {
+            setPendingPhoto(null);
+            setNoteDraft("");
+          }}
+        >
+          <div className="gc-lightbox-inner" onClick={(e) => e.stopPropagation()}>
+            <img src={pendingPhoto.compressed} alt="Vista previa" />
+            <div className="gc-lightbox-footer">
+              <span>¿Agregas una nota? (opcional)</span>
+              <input
+                className="gc-input"
+                placeholder="Ej. piernas hoy 🦵"
+                value={noteDraft}
+                onChange={(e) => setNoteDraft(e.target.value)}
+              />
+              <div className="gc-row-gap">
+                <button className="gc-btn gc-btn-primary" onClick={confirmPendingPhoto}>
+                  Guardar
+                </button>
+                <button
+                  className="gc-btn gc-btn-outline"
+                  onClick={() => {
+                    setPendingPhoto(null);
+                    setNoteDraft("");
+                  }}
+                >
+                  Cancelar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {dayChoice && (
         <div
           className="gc-lightbox"
@@ -797,7 +1134,13 @@ export default function GymCoupleApp() {
           const isMyPhoto = viewingPhoto.name === me;
           const isExcuse = viewEntry.type === "excuse";
           return (
-            <div className="gc-lightbox" onClick={() => { setViewingPhoto(null); setReactionDraft(""); }}>
+            <div
+              className="gc-lightbox"
+              onClick={() => {
+                setViewingPhoto(null);
+                setReactionDraft("");
+              }}
+            >
               <div className="gc-lightbox-inner" onClick={(e) => e.stopPropagation()}>
                 {isExcuse ? (
                   <div className="gc-excuse-view">
@@ -811,6 +1154,8 @@ export default function GymCoupleApp() {
                   <span>
                     {viewingPhoto.name} · {viewingPhoto.date} {isExcuse && "· justificado"}
                   </span>
+
+                  {!isExcuse && viewEntry.note && <p className="gc-checkin-note">"{viewEntry.note}"</p>}
 
                   {isMyPhoto && !isExcuse && viewEntry.reaction && (
                     <p className="gc-current-reaction">
@@ -1039,7 +1384,7 @@ const css = `
 .gc-btn-a { background: var(--accent-a); color: #201203; }
 .gc-btn-b { background: var(--accent-b); color: #06231f; }
 
-.gc-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; gap: 12px; }
+.gc-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 12px; }
 .gc-header-right { display: flex; align-items: center; gap: 10px; }
 .gc-title-row { display: flex; align-items: center; gap: 8px; }
 .gc-app-name { font-size: 17px; font-weight: 700; letter-spacing: -0.01em; }
@@ -1050,13 +1395,20 @@ const css = `
 .gc-streak-num { font-size: 24px; font-weight: 800; line-height: 1; text-align: right; }
 .gc-streak-label { font-size: 10.5px; color: var(--muted); text-align: right; max-width: 90px; }
 
+.gc-reminder {
+  background: var(--accent-a-dim); border: 1px solid var(--accent-a);
+  color: var(--text); border-radius: 10px; padding: 10px 14px;
+  font-size: 13px; margin-bottom: 14px;
+}
+
 .gc-hint-top { display: flex; align-items: center; gap: 6px; margin: 0 0 12px; }
 .gc-week-grid { display: flex; flex-direction: column; gap: 8px; }
 .gc-week-row { display: grid; grid-template-columns: 64px repeat(7, 1fr); gap: 6px; align-items: center; }
 .gc-week-name-spacer { width: 64px; }
 .gc-day-label { text-align: center; font-size: 11px; color: var(--muted); }
 .gc-day-num { font-size: 12px; color: var(--text); font-weight: 600; }
-.gc-week-name { font-size: 13px; font-weight: 700; }
+.gc-week-name { font-size: 13px; font-weight: 700; display: flex; align-items: baseline; gap: 5px; }
+.gc-mini-streak { font-size: 10px; font-weight: 600; color: var(--muted); }
 .gc-text-a { color: var(--accent-a); }
 .gc-text-b { color: var(--accent-b); }
 .gc-day-cell {
@@ -1092,6 +1444,39 @@ const css = `
   background: repeating-linear-gradient(45deg, var(--panel-2), var(--panel-2) 6px, #2f3134 6px, #2f3134 12px);
   color: var(--muted);
 }
+
+.gc-month-nav { display: flex; align-items: center; justify-content: center; gap: 16px; margin: 10px 0; }
+.gc-month-label { font-size: 13.5px; font-weight: 700; min-width: 140px; text-align: center; }
+.gc-month-daylabels {
+  display: grid; grid-template-columns: repeat(7, 1fr); text-align: center;
+  font-size: 10px; color: var(--muted); margin-bottom: 4px;
+}
+.gc-month-row { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; margin-bottom: 3px; }
+.gc-month-cell {
+  aspect-ratio: 1; border-radius: 6px; background: var(--panel-2);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+  font-size: 10px; color: var(--muted);
+}
+.gc-month-blank { background: transparent; }
+.gc-month-today { border: 1px solid var(--accent-a); }
+.gc-month-daynum { font-size: 10px; }
+.gc-month-dots { display: flex; gap: 2px; }
+.gc-dot { width: 5px; height: 5px; border-radius: 999px; border: 1px solid var(--muted); background: transparent; }
+.gc-dot-filled.gc-dot-a { background: var(--accent-a); border-color: var(--accent-a); }
+.gc-dot-filled.gc-dot-b { background: var(--accent-b); border-color: var(--accent-b); }
+
+.gc-stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 10px; }
+.gc-stat { text-align: center; }
+.gc-stat-num { font-size: 20px; font-weight: 800; }
+.gc-stat-label { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+.gc-achv-grid { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.gc-achv {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+  background: var(--panel-2); border-radius: 8px; opacity: 0.5; font-size: 13px;
+}
+.gc-achv-earned { opacity: 1; }
+.gc-achv-icon { font-size: 16px; width: 22px; text-align: center; color: var(--muted); }
 
 .gc-goal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .gc-goal-title { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14.5px; }
@@ -1150,6 +1535,7 @@ const css = `
 .gc-lightbox-inner img { width: 100%; display: block; max-height: 360px; object-fit: cover; }
 .gc-lightbox-footer { padding: 12px 14px; font-size: 13px; }
 .gc-lightbox-footer > span { display: block; margin-bottom: 8px; color: var(--muted); }
+.gc-checkin-note { margin: 0 0 10px; font-style: italic; color: var(--text); }
 .gc-reaction-row { display: flex; gap: 8px; margin-bottom: 10px; }
 .gc-reaction-btn {
   background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
