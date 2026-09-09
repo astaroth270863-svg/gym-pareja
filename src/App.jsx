@@ -812,6 +812,12 @@ export default function GymCoupleApp() {
                     {viewingPhoto.name} · {viewingPhoto.date} {isExcuse && "· justificado"}
                   </span>
 
+                  {isMyPhoto && !isExcuse && viewEntry.reaction && (
+                    <p className="gc-current-reaction">
+                      Tu pareja reaccionó: <span className="gc-reaction-emoji-big">{viewEntry.reaction}</span>
+                    </p>
+                  )}
+
                   {!isMyPhoto && !isExcuse && (
                     <>
                       <div className="gc-reaction-row">
@@ -1077,11 +1083,10 @@ const css = `
 .gc-cell-a:not([style*="background-image"]) { background: var(--accent-a); border-color: var(--accent-a); }
 .gc-cell-b:not([style*="background-image"]) { background: var(--accent-b); border-color: var(--accent-b); }
 .gc-cell-reaction {
-  position: absolute; bottom: -2px; right: -2px;
-  font-size: 13px; line-height: 1;
-  background: var(--panel); border-radius: 999px;
-  width: 18px; height: 18px; display: flex; align-items: center; justify-content: center;
-  box-shadow: 0 0 0 2px var(--panel);
+  position: absolute; bottom: 2px; right: 2px;
+  font-size: 12px; line-height: 1;
+  background: rgba(0,0,0,0.55); border-radius: 999px;
+  width: 17px; height: 17px; display: flex; align-items: center; justify-content: center;
 }
 .gc-cell-excuse {
   background: repeating-linear-gradient(45deg, var(--panel-2), var(--panel-2) 6px, #2f3134 6px, #2f3134 12px);
@@ -1154,6 +1159,7 @@ const css = `
 .gc-reaction-custom { display: flex; gap: 6px; margin-bottom: 10px; }
 .gc-input-emoji { margin-top: 0; font-size: 16px; }
 .gc-current-reaction { margin: 0 0 10px; }
+.gc-reaction-emoji-big { font-size: 20px; vertical-align: middle; }
 
 .gc-choice-inner { max-width: 300px; }
 .gc-choice-or { justify-content: center; margin: 10px 0; }
