@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { doc, collection, onSnapshot, setDoc, deleteDoc } from "firebase/firestore";
 import { db } from "./firebase";
+import { LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, ResponsiveContainer } from "recharts";
 import {
   Flame,
   Dumbbell,
@@ -35,6 +36,18 @@ const MONTH_LABELS = [
   "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
 ];
 const REACTIONS = ["🔥", "💪", "👏", "❤️"];
+
+// Medidas genéricas: sirven igual para registrar el progreso de un hombre o
+// de una mujer, cada quien llena las que le interesen.
+const METRICS = [
+  { key: "weight", label: "Peso" },
+  { key: "waist", label: "Cintura" },
+  { key: "hip", label: "Cadera" },
+  { key: "chest", label: "Pecho/busto" },
+  { key: "arm", label: "Brazo" },
+  { key: "thigh", label: "Pierna" },
+];
+const EMPTY_MEASURE_FORM = { weight: "", waist: "", hip: "", chest: "", arm: "", thigh: "", photo: null };
 
 function toISODate(d) {
   const y = d.getFullYear();
@@ -182,7 +195,7 @@ export default function GymCoupleApp() {
   const [editingNames, setEditingNames] = useState(false);
   const [nameDraft, setNameDraft] = useState({ a: "", b: "" });
   const [measurementsMap, setMeasurementsMap] = useState({}); // { name: [entries] }
-  const [measurementForm, setMeasurementForm] = useState({ weight: "", waist: "", photo: null });
+  const [measurementForm, setMeasurementForm] = useState(EMPTY_MEASURE_FORM);
   const [savingMeasurement, setSavingMeasurement] = useState(false);
   const [measurementError, setMeasurementError] = useState("");
   const [viewingMeasurement, setViewingMeasurement] = useState(null); // entry object
@@ -231,6 +244,10 @@ export default function GymCoupleApp() {
           name: d.name,
           weight: d.weight ?? null,
           waist: d.waist ?? null,
+          hip: d.hip ?? null,
+          chest: d.chest ?? null,
+          arm: d.arm ?? null,
+          thigh: d.thigh ?? null,
           photo: d.photo || null,
           ts: d.ts,
         });
@@ -357,10 +374,15 @@ export default function GymCoupleApp() {
   };
 
   const saveMeasurement = async () => {
-    const weight = measurementForm.weight.trim();
-    const waist = measurementForm.waist.trim();
-    if (!weight && !waist && !measurementForm.photo) {
-      setMeasurementError("Agrega al menos un dato: peso, cintura o foto.");
+    const parsed = {};
+    let hasAny = false;
+    METRICS.forEach(({ key }) => {
+      const v = measurementForm[key].trim();
+      parsed[key] = v ? parseFloat(v) : null;
+      if (v) hasAny = true;
+    });
+    if (!hasAny && !measurementForm.photo) {
+      setMeasurementError("Agrega al menos una medida o una foto.");
       return;
     }
     setSavingMeasurement(true);
@@ -371,12 +393,11 @@ export default function GymCoupleApp() {
       await setDoc(measurementDoc, {
         date: dateStr,
         name: me,
-        weight: weight ? parseFloat(weight) : null,
-        waist: waist ? parseFloat(waist) : null,
+        ...parsed,
         photo: measurementForm.photo || null,
         ts: new Date().toISOString(),
       });
-      setMeasurementForm({ weight: "", waist: "", photo: null });
+      setMeasurementForm(EMPTY_MEASURE_FORM);
     } catch (e) {
       console.error(e);
       setMeasurementError("No se pudo guardar, intenta de nuevo.");
@@ -931,26 +952,23 @@ export default function GymCoupleApp() {
           <Ruler size={18} />
           <span>Progreso corporal</span>
         </div>
-        <p className="gc-hint gc-hint-top">Registra tu peso, medidas o una foto cuando quieras (ideal: 1 vez por semana).</p>
+        <p className="gc-hint gc-hint-top">
+          Registra las medidas que te interesen (todas opcionales) o solo una foto, cuando quieras.
+        </p>
 
         <div className="gc-measure-form">
-          <div className="gc-row-gap">
-            <input
-              className="gc-input"
-              type="number"
-              step="0.1"
-              placeholder="Peso"
-              value={measurementForm.weight}
-              onChange={(e) => setMeasurementForm((f) => ({ ...f, weight: e.target.value }))}
-            />
-            <input
-              className="gc-input"
-              type="number"
-              step="0.1"
-              placeholder="Cintura (opcional)"
-              value={measurementForm.waist}
-              onChange={(e) => setMeasurementForm((f) => ({ ...f, waist: e.target.value }))}
-            />
+          <div className="gc-measure-grid">
+            {METRICS.map(({ key, label }) => (
+              <input
+                key={key}
+                className="gc-input"
+                type="number"
+                step="0.1"
+                placeholder={label}
+                value={measurementForm[key]}
+                onChange={(e) => setMeasurementForm((f) => ({ ...f, [key]: e.target.value }))}
+              />
+            ))}
           </div>
           {measurementForm.photo ? (
             <div className="gc-measure-preview">
@@ -969,6 +987,8 @@ export default function GymCoupleApp() {
           </button>
           {measurementError && <p className="gc-hint gc-hint-error">{measurementError}</p>}
         </div>
+
+        <ProgressCharts measurementsMap={measurementsMap} names={names} />
 
         <div className="gc-measure-history">
           <MeasurementColumn
@@ -1402,8 +1422,14 @@ export default function GymCoupleApp() {
             {viewingMeasurement.photo && <img src={viewingMeasurement.photo} alt="Progreso" />}
             <div className="gc-lightbox-footer">
               <span>{viewingMeasurement.date}</span>
-              {viewingMeasurement.weight != null && <p className="gc-checkin-note">Peso: {viewingMeasurement.weight}</p>}
-              {viewingMeasurement.waist != null && <p className="gc-checkin-note">Cintura: {viewingMeasurement.waist}</p>}
+              {METRICS.map(
+                ({ key, label }) =>
+                  viewingMeasurement[key] != null && (
+                    <p className="gc-checkin-note" key={key}>
+                      {label}: {viewingMeasurement[key]}
+                    </p>
+                  )
+              )}
               <div className="gc-row-gap">
                 {viewingMeasurement.name === me && (
                   <button className="gc-btn gc-btn-tiny gc-btn-outline" onClick={() => removeMeasurement(viewingMeasurement.id)}>
@@ -1467,6 +1493,72 @@ function WishColumn({ label, variant, items, editable, onAdd, onRemove }) {
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+// Arma los puntos de una gráfica: una fila por fecha, con el valor de cada
+// quien en esa fecha (o null si ese día no registró esa medida).
+function buildMetricSeries(measurementsMap, names, metricKey) {
+  const [nameA, nameB] = names;
+  const listA = measurementsMap[nameA] || [];
+  const listB = measurementsMap[nameB] || [];
+  const dates = new Set([...listA.map((e) => e.date), ...listB.map((e) => e.date)]);
+  const sorted = [...dates].sort();
+  return sorted.map((date) => {
+    const a = listA.find((e) => e.date === date);
+    const b = listB.find((e) => e.date === date);
+    return {
+      date: date.slice(5), // MM-DD, más compacto en el eje
+      [nameA]: a?.[metricKey] ?? null,
+      [nameB]: b?.[metricKey] ?? null,
+    };
+  });
+}
+
+function ProgressCharts({ measurementsMap, names }) {
+  const [nameA, nameB] = names;
+  const chartsWithData = METRICS.map(({ key, label }) => ({
+    key,
+    label,
+    data: buildMetricSeries(measurementsMap, names, key),
+  })).filter((c) => c.data.some((row) => row[nameA] != null || row[nameB] != null));
+
+  if (chartsWithData.length === 0) return null;
+
+  return (
+    <div className="gc-charts">
+      {chartsWithData.map(({ key, label, data }) => (
+        <div className="gc-chart-card" key={key}>
+          <div className="gc-chart-title">{label}</div>
+          <ResponsiveContainer width="100%" height={140}>
+            <LineChart data={data} margin={{ top: 5, right: 8, left: -20, bottom: 0 }}>
+              <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+              <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#9a9c9e" }} axisLine={false} tickLine={false} />
+              <YAxis tick={{ fontSize: 10, fill: "#9a9c9e" }} axisLine={false} tickLine={false} width={30} />
+              <Tooltip
+                contentStyle={{ background: "#1f2123", border: "1px solid rgba(255,255,255,0.09)", fontSize: 12 }}
+              />
+              <Line
+                type="monotone"
+                dataKey={nameA}
+                stroke="#f2a93b"
+                strokeWidth={2}
+                dot={{ r: 2 }}
+                connectNulls
+              />
+              <Line
+                type="monotone"
+                dataKey={nameB}
+                stroke="#2fb6a8"
+                strokeWidth={2}
+                dot={{ r: 2 }}
+                connectNulls
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      ))}
     </div>
   );
 }
@@ -1771,6 +1863,11 @@ const css = `
 
 .gc-measure-form { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
 .gc-measure-form .gc-row-gap .gc-input { margin-top: 0; }
+.gc-measure-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.gc-measure-grid .gc-input { margin-top: 0; }
+.gc-charts { display: flex; flex-direction: column; gap: 14px; margin-bottom: 18px; }
+.gc-chart-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 6px 4px; }
+.gc-chart-title { font-size: 12.5px; font-weight: 700; margin: 0 0 4px 10px; }
 .gc-measure-preview { position: relative; width: 100%; }
 .gc-measure-preview img { width: 100%; border-radius: 8px; display: block; max-height: 160px; object-fit: cover; }
 .gc-measure-preview .gc-icon-btn { position: absolute; top: 6px; right: 6px; background: rgba(0,0,0,0.6); }
