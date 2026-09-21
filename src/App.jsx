@@ -715,9 +715,6 @@ export default function GymCoupleApp() {
           Peso y medidas de {nameA} y {nameB} en el tiempo.
         </p>
         <ProgressCharts measurementsMap={measurementsMap} names={names} />
-        {Object.keys(measurementsMap).length === 0 && (
-          <p className="gc-muted gc-empty">Todavía no hay registros. Agrega uno desde "Progreso corporal".</p>
-        )}
       </div>
     );
   }
@@ -1546,47 +1543,40 @@ function buildMetricSeries(measurementsMap, names, metricKey) {
 
 function ProgressCharts({ measurementsMap, names }) {
   const [nameA, nameB] = names;
-  const chartsWithData = METRICS.map(({ key, label }) => ({
-    key,
-    label,
-    data: buildMetricSeries(measurementsMap, names, key),
-  })).filter((c) => c.data.some((row) => row[nameA] != null || row[nameB] != null));
-
-  if (chartsWithData.length === 0) return null;
 
   return (
     <div className="gc-charts">
-      {chartsWithData.map(({ key, label, data }) => (
-        <div className="gc-chart-card" key={key}>
-          <div className="gc-chart-title">{label}</div>
-          <ResponsiveContainer width="100%" height={140}>
-            <LineChart data={data} margin={{ top: 5, right: 8, left: -20, bottom: 0 }}>
-              <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
-              <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#9a9c9e" }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize: 10, fill: "#9a9c9e" }} axisLine={false} tickLine={false} width={30} />
-              <Tooltip
-                contentStyle={{ background: "#1f2123", border: "1px solid rgba(255,255,255,0.09)", fontSize: 12 }}
-              />
-              <Line
-                type="monotone"
-                dataKey={nameA}
-                stroke="#f2a93b"
-                strokeWidth={2}
-                dot={{ r: 2 }}
-                connectNulls
-              />
-              <Line
-                type="monotone"
-                dataKey={nameB}
-                stroke="#2fb6a8"
-                strokeWidth={2}
-                dot={{ r: 2 }}
-                connectNulls
-              />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
-      ))}
+      {METRICS.map(({ key, label }) => {
+        const data = buildMetricSeries(measurementsMap, names, key);
+        const hasData = data.some((row) => row[nameA] != null || row[nameB] != null);
+        return (
+          <div className="gc-chart-card" key={key}>
+            <div className="gc-chart-title">{label}</div>
+            {hasData ? (
+              <ResponsiveContainer width="100%" height={160}>
+                <LineChart data={data} margin={{ top: 5, right: 16, left: 0, bottom: 0 }}>
+                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                  <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#9a9c9e" }} axisLine={false} tickLine={false} />
+                  <YAxis
+                    tick={{ fontSize: 10, fill: "#9a9c9e" }}
+                    axisLine={false}
+                    tickLine={false}
+                    width={38}
+                    domain={["dataMin - 1", "dataMax + 1"]}
+                  />
+                  <Tooltip
+                    contentStyle={{ background: "#1f2123", border: "1px solid rgba(255,255,255,0.09)", fontSize: 12 }}
+                  />
+                  <Line type="monotone" dataKey={nameA} stroke="#f2a93b" strokeWidth={2} dot={{ r: 2 }} connectNulls />
+                  <Line type="monotone" dataKey={nameB} stroke="#2fb6a8" strokeWidth={2} dot={{ r: 2 }} connectNulls />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : (
+              <p className="gc-muted gc-chart-empty">Sin datos todavía.</p>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -1662,7 +1652,7 @@ const css = `
   background: var(--bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  padding: 20px 16px 40px;
+  padding: calc(20px + env(safe-area-inset-top, 0px)) 16px calc(40px + env(safe-area-inset-bottom, 0px));
   min-height: 100vh;
   box-sizing: border-box;
   max-width: 480px;
@@ -1896,6 +1886,7 @@ const css = `
 .gc-charts { display: flex; flex-direction: column; gap: 14px; margin-bottom: 18px; }
 .gc-chart-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 6px 4px; }
 .gc-chart-title { font-size: 12.5px; font-weight: 700; margin: 0 0 4px 10px; }
+.gc-chart-empty { padding: 30px 0; text-align: center; margin: 0; }
 .gc-measure-preview { position: relative; width: 100%; }
 .gc-measure-preview img { width: 100%; border-radius: 8px; display: block; max-height: 160px; object-fit: cover; }
 .gc-measure-preview .gc-icon-btn { position: absolute; top: 6px; right: 6px; background: rgba(0,0,0,0.6); }
