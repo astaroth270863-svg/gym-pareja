@@ -23,6 +23,8 @@ import {
   Lock,
   Ruler,
   ImagePlus,
+  ArrowLeft,
+  LineChart as LineChartIcon,
 } from "lucide-react";
 
 const DOC_REF = doc(db, "gymCouple", "shared");
@@ -199,6 +201,7 @@ export default function GymCoupleApp() {
   const [savingMeasurement, setSavingMeasurement] = useState(false);
   const [measurementError, setMeasurementError] = useState("");
   const [viewingMeasurement, setViewingMeasurement] = useState(null); // entry object
+  const [view, setView] = useState("main"); // "main" | "charts"
   const fileInputRef = useRef(null);
   const pendingCellRef = useRef(null);
   const measurementFileInputRef = useRef(null);
@@ -696,6 +699,29 @@ export default function GymCoupleApp() {
     { id: "trained50", icon: "📸📸", label: "50 entrenamientos", earned50: true },
   ];
 
+  if (view === "charts") {
+    return (
+      <div className="gc-app">
+        <style>{css}</style>
+        <header className="gc-header">
+          <div className="gc-title-row">
+            <button className="gc-icon-btn" onClick={() => setView("main")} title="Volver">
+              <ArrowLeft size={16} />
+            </button>
+            <span className="gc-app-name">Gráficas de progreso</span>
+          </div>
+        </header>
+        <p className="gc-hint gc-hint-top">
+          Peso y medidas de {nameA} y {nameB} en el tiempo.
+        </p>
+        <ProgressCharts measurementsMap={measurementsMap} names={names} />
+        {Object.keys(measurementsMap).length === 0 && (
+          <p className="gc-muted gc-empty">Todavía no hay registros. Agrega uno desde "Progreso corporal".</p>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="gc-app">
       <style>{css}</style>
@@ -988,7 +1014,9 @@ export default function GymCoupleApp() {
           {measurementError && <p className="gc-hint gc-hint-error">{measurementError}</p>}
         </div>
 
-        <ProgressCharts measurementsMap={measurementsMap} names={names} />
+        <button className="gc-btn gc-btn-outline" onClick={() => setView("charts")}>
+          <LineChartIcon size={14} /> Ver gráficas de progreso
+        </button>
 
         <div className="gc-measure-history">
           <MeasurementColumn
