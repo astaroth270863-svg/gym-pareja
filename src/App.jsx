@@ -20,10 +20,13 @@ import {
   BarChart3,
   Award,
   Lock,
+  Ruler,
+  ImagePlus,
 } from "lucide-react";
 
 const DOC_REF = doc(db, "gymCouple", "shared");
 const CHECKINS_COL = collection(db, "checkins");
+const MEASUREMENTS_COL = collection(db, "measurements");
 const ME_KEY = "gc:me";
 
 const DAY_LABELS = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"];
@@ -178,8 +181,14 @@ export default function GymCoupleApp() {
   const [monthCursor, setMonthCursor] = useState(() => startOfMonth(new Date()));
   const [editingNames, setEditingNames] = useState(false);
   const [nameDraft, setNameDraft] = useState({ a: "", b: "" });
+  const [measurementsMap, setMeasurementsMap] = useState({}); // { name: [entries] }
+  const [measurementForm, setMeasurementForm] = useState({ weight: "", waist: "", photo: null });
+  const [savingMeasurement, setSavingMeasurement] = useState(false);
+  const [measurementError, setMeasurementError] = useState("");
+  const [viewingMeasurement, setViewingMeasurement] = useState(null); // entry object
   const fileInputRef = useRef(null);
   const pendingCellRef = useRef(null);
+  const measurementFileInputRef = useRef(null);
 
   useEffect(() => {
     const unsubMeta = onSnapshot(
@@ -210,11 +219,31 @@ export default function GymCoupleApp() {
       });
       setCheckinsMap(map);
     });
+    const unsubMeasurements = onSnapshot(MEASUREMENTS_COL, (snap) => {
+      const map = {};
+      snap.forEach((docSnap) => {
+        const d = docSnap.data();
+        if (!d?.date || !d?.name) return;
+        if (!map[d.name]) map[d.name] = [];
+        map[d.name].push({
+          id: docSnap.id,
+          date: d.date,
+          name: d.name,
+          weight: d.weight ?? null,
+          waist: d.waist ?? null,
+          photo: d.photo || null,
+          ts: d.ts,
+        });
+      });
+      Object.values(map).forEach((list) => list.sort((a, b) => (a.date < b.date ? -1 : 1)));
+      setMeasurementsMap(map);
+    });
     const savedMe = window.localStorage.getItem(ME_KEY);
     if (savedMe) setMe(savedMe);
     return () => {
       unsubMeta();
       unsubCheckins();
+      unsubMeasurements();
     };
   }, []);
 
@@ -308,6 +337,61 @@ export default function GymCoupleApp() {
     } catch (e) {
       console.error("No se pudo guardar la reacción", e);
     }
+  };
+
+  const requestMeasurementPhoto = () => {
+    measurementFileInputRef.current?.click();
+  };
+
+  const handleMeasurementFileChosen = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const compressed = await fileToCompressedDataURL(file, 480, 0.6);
+      setMeasurementForm((f) => ({ ...f, photo: compressed }));
+    } catch (err) {
+      console.error(err);
+      setMeasurementError("No se pudo procesar la foto, intenta de nuevo.");
+    }
+  };
+
+  const saveMeasurement = async () => {
+    const weight = measurementForm.weight.trim();
+    const waist = measurementForm.waist.trim();
+    if (!weight && !waist && !measurementForm.photo) {
+      setMeasurementError("Agrega al menos un dato: peso, cintura o foto.");
+      return;
+    }
+    setSavingMeasurement(true);
+    setMeasurementError("");
+    try {
+      const dateStr = toISODate(new Date());
+      const measurementDoc = doc(db, "measurements", `${dateStr}_${me}`);
+      await setDoc(measurementDoc, {
+        date: dateStr,
+        name: me,
+        weight: weight ? parseFloat(weight) : null,
+        waist: waist ? parseFloat(waist) : null,
+        photo: measurementForm.photo || null,
+        ts: new Date().toISOString(),
+      });
+      setMeasurementForm({ weight: "", waist: "", photo: null });
+    } catch (e) {
+      console.error(e);
+      setMeasurementError("No se pudo guardar, intenta de nuevo.");
+    } finally {
+      setSavingMeasurement(false);
+    }
+  };
+
+  const removeMeasurement = async (id) => {
+    try {
+      await deleteDoc(doc(db, "measurements", id));
+    } catch (e) {
+      console.error("No se pudo eliminar el registro", e);
+    }
+    setViewingMeasurement(null);
   };
 
   const saveExcuse = async (dateStr, name, reason) => {
@@ -554,6 +638,9 @@ export default function GymCoupleApp() {
   const showReminder = !iCheckedInToday && today.getHours() >= 18;
   const monthWeeks = buildMonthGrid(monthCursor);
   const isCurrentMonth = monthCursor.getFullYear() === today.getFullYear() && monthCursor.getMonth() === today.getMonth();
+  const myMeasurements = measurementsMap[me] || [];
+  const partnerMeasurements = measurementsMap[partnerName] || [];
+  const myLastMeasurement = myMeasurements[myMeasurements.length - 1] || null;
 
   const ACHIEVEMENTS = [
     {
@@ -599,6 +686,14 @@ export default function GymCoupleApp() {
         capture="environment"
         style={{ display: "none" }}
         onChange={handleFileChosen}
+      />
+      <input
+        ref={measurementFileInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        style={{ display: "none" }}
+        onChange={handleMeasurementFileChosen}
       />
 
       <header className="gc-header">
@@ -828,6 +923,66 @@ export default function GymCoupleApp() {
               <span className="gc-achv-label">{name}: 50 entrenamientos</span>
             </div>
           ))}
+        </div>
+      </section>
+
+      <section className="gc-panel gc-measurements">
+        <div className="gc-goal-title">
+          <Ruler size={18} />
+          <span>Progreso corporal</span>
+        </div>
+        <p className="gc-hint gc-hint-top">Registra tu peso, medidas o una foto cuando quieras (ideal: 1 vez por semana).</p>
+
+        <div className="gc-measure-form">
+          <div className="gc-row-gap">
+            <input
+              className="gc-input"
+              type="number"
+              step="0.1"
+              placeholder="Peso"
+              value={measurementForm.weight}
+              onChange={(e) => setMeasurementForm((f) => ({ ...f, weight: e.target.value }))}
+            />
+            <input
+              className="gc-input"
+              type="number"
+              step="0.1"
+              placeholder="Cintura (opcional)"
+              value={measurementForm.waist}
+              onChange={(e) => setMeasurementForm((f) => ({ ...f, waist: e.target.value }))}
+            />
+          </div>
+          {measurementForm.photo ? (
+            <div className="gc-measure-preview">
+              <img src={measurementForm.photo} alt="Vista previa" />
+              <button className="gc-icon-btn" onClick={() => setMeasurementForm((f) => ({ ...f, photo: null }))}>
+                <X size={14} />
+              </button>
+            </div>
+          ) : (
+            <button className="gc-btn gc-btn-outline" onClick={requestMeasurementPhoto}>
+              <ImagePlus size={14} /> Agregar foto de progreso (opcional)
+            </button>
+          )}
+          <button className="gc-btn gc-btn-primary" disabled={savingMeasurement} onClick={saveMeasurement}>
+            {savingMeasurement ? "Guardando…" : "Guardar registro de hoy"}
+          </button>
+          {measurementError && <p className="gc-hint gc-hint-error">{measurementError}</p>}
+        </div>
+
+        <div className="gc-measure-history">
+          <MeasurementColumn
+            label={`${me} (tú)`}
+            variant={me === nameA ? "a" : "b"}
+            entries={myMeasurements}
+            onView={setViewingMeasurement}
+          />
+          <MeasurementColumn
+            label={partnerName}
+            variant={partnerName === nameA ? "a" : "b"}
+            entries={partnerMeasurements}
+            onView={setViewingMeasurement}
+          />
         </div>
       </section>
 
@@ -1240,6 +1395,29 @@ export default function GymCoupleApp() {
             </div>
           );
         })()}
+
+      {viewingMeasurement && (
+        <div className="gc-lightbox" onClick={() => setViewingMeasurement(null)}>
+          <div className="gc-lightbox-inner" onClick={(e) => e.stopPropagation()}>
+            {viewingMeasurement.photo && <img src={viewingMeasurement.photo} alt="Progreso" />}
+            <div className="gc-lightbox-footer">
+              <span>{viewingMeasurement.date}</span>
+              {viewingMeasurement.weight != null && <p className="gc-checkin-note">Peso: {viewingMeasurement.weight}</p>}
+              {viewingMeasurement.waist != null && <p className="gc-checkin-note">Cintura: {viewingMeasurement.waist}</p>}
+              <div className="gc-row-gap">
+                {viewingMeasurement.name === me && (
+                  <button className="gc-btn gc-btn-tiny gc-btn-outline" onClick={() => removeMeasurement(viewingMeasurement.id)}>
+                    Eliminar
+                  </button>
+                )}
+                <button className="gc-btn gc-btn-tiny gc-btn-primary" onClick={() => setViewingMeasurement(null)}>
+                  Cerrar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1289,6 +1467,41 @@ function WishColumn({ label, variant, items, editable, onAdd, onRemove }) {
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+function MeasurementColumn({ label, variant, entries, onView }) {
+  const recent = [...entries].reverse().slice(0, 6);
+  return (
+    <div className="gc-measure-col">
+      <div className={`gc-wish-label ${variant === "a" ? "gc-text-a" : "gc-text-b"}`}>{label}</div>
+      {recent.length === 0 && <p className="gc-muted gc-wish-empty">Sin registros todavía.</p>}
+      <ul className="gc-measure-list">
+        {recent.map((entry, i) => {
+          const prev = recent[i + 1];
+          const diff = prev && entry.weight != null && prev.weight != null ? entry.weight - prev.weight : null;
+          return (
+            <li key={entry.id} onClick={() => onView(entry)}>
+              {entry.photo && <img src={entry.photo} alt="" className="gc-measure-thumb" />}
+              <div className="gc-measure-info">
+                <span className="gc-measure-date">{entry.date}</span>
+                <span className="gc-measure-values">
+                  {entry.weight != null && <>{entry.weight}</>}
+                  {entry.waist != null && <> · cintura {entry.waist}</>}
+                  {diff != null && (
+                    <span className={diff < 0 ? "gc-measure-down" : diff > 0 ? "gc-measure-up" : ""}>
+                      {" "}
+                      ({diff > 0 ? "+" : ""}
+                      {diff.toFixed(1)})
+                    </span>
+                  )}
+                </span>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }
@@ -1555,4 +1768,23 @@ const css = `
   color: var(--muted); text-align: center;
 }
 .gc-excuse-view p { margin: 0; color: var(--text); font-size: 14px; }
+
+.gc-measure-form { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
+.gc-measure-form .gc-row-gap .gc-input { margin-top: 0; }
+.gc-measure-preview { position: relative; width: 100%; }
+.gc-measure-preview img { width: 100%; border-radius: 8px; display: block; max-height: 160px; object-fit: cover; }
+.gc-measure-preview .gc-icon-btn { position: absolute; top: 6px; right: 6px; background: rgba(0,0,0,0.6); }
+.gc-measure-history { display: flex; flex-direction: column; gap: 16px; }
+.gc-measure-col:last-child { margin-bottom: 0; }
+.gc-measure-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.gc-measure-list li {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 7px 10px; font-size: 12.5px; cursor: pointer;
+}
+.gc-measure-thumb { width: 32px; height: 32px; border-radius: 6px; object-fit: cover; flex-shrink: 0; }
+.gc-measure-info { display: flex; flex-direction: column; gap: 1px; }
+.gc-measure-date { color: var(--muted); font-size: 11px; }
+.gc-measure-down { color: var(--success); }
+.gc-measure-up { color: var(--danger); }
 `;
